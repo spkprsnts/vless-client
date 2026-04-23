@@ -35,6 +35,9 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/tls"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
 	_ "github.com/xtls/xray-core/proxy/wireguard"
+
+	_ "github.com/xtls/xray-core/app/dns"
+	_ "github.com/xtls/xray-core/app/router"
 )
 
 type VLessConfig struct {
@@ -210,6 +213,9 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel},
 		"stats": map[string]any{},
+		"dns": map[string]any{
+			"servers": []string{"8.8.8.8", "1.1.1.1"},
+		},
 		"policy": map[string]any{
 			"system": map[string]any{
 				"statsOutboundUplink":   true,
@@ -380,6 +386,9 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel},
 		"stats": map[string]any{},
+		"dns": map[string]any{
+			"servers": []string{"8.8.8.8", "1.1.1.1"},
+		},
 		"policy": map[string]any{
 			"system": map[string]any{
 				"statsOutboundUplink":   true,
