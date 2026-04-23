@@ -14,6 +14,21 @@ import (
 
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
+
+	// Blank imports for xray-core features.
+	// These are required to register the components with the core.
+	_ "github.com/xtls/xray-core/app/dispatcher"
+	_ "github.com/xtls/xray-core/app/log"
+	_ "github.com/xtls/xray-core/app/proxyman/inbound"
+	_ "github.com/xtls/xray-core/app/proxyman/outbound"
+	_ "github.com/xtls/xray-core/proxy/http"
+	_ "github.com/xtls/xray-core/proxy/socks"
+	_ "github.com/xtls/xray-core/proxy/vless/outbound"
+	_ "github.com/xtls/xray-core/transport/internet/grpc"
+	_ "github.com/xtls/xray-core/transport/internet/reality"
+	_ "github.com/xtls/xray-core/transport/internet/tcp"
+	_ "github.com/xtls/xray-core/transport/internet/tls"
+	_ "github.com/xtls/xray-core/transport/internet/websocket"
 )
 
 type VLessConfig struct {
@@ -66,22 +81,28 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 }
 
 // Generate Xray configuration
-func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string) ([]byte, error) {
+func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) ([]byte, error) {
+	logLevel := "error"
+	if debug {
+		logLevel = "debug"
+	}
+
 	// Outbound settings
 	security := cfg.Params["security"]
 	if security == "" {
 		security = "tls"
 	}
-	streamSettings := map[string]interface{}{
+	streamSettings := map[string]any{
 		"network": cfg.Params["type"],
 	}
 	if cfg.Params["type"] == "" {
 		streamSettings["network"] = "tcp"
 	}
 
-	if security == "tls" {
+	switch security {
+	case "tls":
 		streamSettings["security"] = "tls"
-		tlsSettings := map[string]interface{}{
+		tlsSettings := map[string]any{
 			"serverName": cfg.Params["sni"],
 		}
 		if cfg.Params["sni"] == "" {
@@ -91,9 +112,9 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string) ([]byte, err
 			tlsSettings["fingerprint"] = fp
 		}
 		streamSettings["tlsSettings"] = tlsSettings
-	} else if security == "reality" {
+	case "reality":
 		streamSettings["security"] = "reality"
-		streamSettings["realitySettings"] = map[string]interface{}{
+		streamSettings["realitySettings"] = map[string]any{
 			"serverName":  cfg.Params["sni"],
 			"fingerprint": cfg.Params["fp"],
 			"publicKey":   cfg.Params["pbk"],
@@ -103,7 +124,7 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string) ([]byte, err
 
 	// WebSocket
 	if cfg.Params["type"] == "ws" {
-		ws := map[string]interface{}{}
+		ws := map[string]any{}
 		if path := cfg.Params["path"]; path != "" {
 			ws["path"] = path
 		}
@@ -114,51 +135,51 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string) ([]byte, err
 	}
 	// gRPC
 	if cfg.Params["type"] == "grpc" {
-		streamSettings["grpcSettings"] = map[string]interface{}{
+		streamSettings["grpcSettings"] = map[string]any{
 			"serviceName": cfg.Params["serviceName"],
 		}
 	}
 
 	// Inbounds
-	var inbounds []interface{}
+	var inbounds []any
 	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
 	listenPort, _ := strconv.Atoi(listenPortStr)
 
 	if httpAddr == "" {
 		// Mixed mode: one port for SOCKS5 + HTTP
-		inbounds = append(inbounds, map[string]interface{}{
+		inbounds = append(inbounds, map[string]any{
 			"listen":   listenHost,
 			"port":     listenPort,
 			"protocol": "http",
-			"settings": map[string]interface{}{
+			"settings": map[string]any{
 				"timeout":          0,
 				"allowTransparent": true,
 			},
-			"sniffing": map[string]interface{}{
+			"sniffing": map[string]any{
 				"enabled":      true,
 				"destOverride": []string{"http", "tls"},
 			},
 		})
 	} else {
 		// Separate proxies: SOCKS5 on listenAddr, HTTP on httpAddr
-		inbounds = append(inbounds, map[string]interface{}{
+		inbounds = append(inbounds, map[string]any{
 			"listen":   listenHost,
 			"port":     listenPort,
 			"protocol": "socks",
-			"settings": map[string]interface{}{"udp": true},
-			"sniffing": map[string]interface{}{
+			"settings": map[string]any{"udp": true},
+			"sniffing": map[string]any{
 				"enabled":      true,
 				"destOverride": []string{"http", "tls"},
 			},
 		})
 		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
 		httpPort, _ := strconv.Atoi(httpPortStr)
-		inbounds = append(inbounds, map[string]interface{}{
+		inbounds = append(inbounds, map[string]any{
 			"listen":   httpHost,
 			"port":     httpPort,
 			"protocol": "http",
-			"settings": map[string]interface{}{"timeout": 0},
-			"sniffing": map[string]interface{}{
+			"settings": map[string]any{"timeout": 0},
+			"sniffing": map[string]any{
 				"enabled":      true,
 				"destOverride": []string{"http", "tls"},
 			},
@@ -166,19 +187,19 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string) ([]byte, err
 	}
 
 	// Full configuration
-	configJSON := map[string]interface{}{
-		"log":      map[string]interface{}{"loglevel": "warning"},
+	configJSON := map[string]any{
+		"log":      map[string]any{"loglevel": logLevel},
 		"inbounds": inbounds,
-		"outbounds": []interface{}{
-			map[string]interface{}{
+		"outbounds": []any{
+			map[string]any{
 				"protocol": "vless",
-				"settings": map[string]interface{}{
-					"vnext": []interface{}{
-						map[string]interface{}{
+				"settings": map[string]any{
+					"vnext": []any{
+						map[string]any{
 							"address": cfg.Address,
 							"port":    cfg.Port,
-							"users": []interface{}{
-								map[string]interface{}{
+							"users": []any{
+								map[string]any{
 									"id":         cfg.UUID,
 									"encryption": cfg.Params["encryption"],
 									"flow":       cfg.Params["flow"],
@@ -199,6 +220,7 @@ func main() {
 	listen := flag.String("listen", "", "Address ip:port for mixed proxy (SOCKS5+HTTP) (required)")
 	httpSep := flag.String("http", "", "Optional: separate HTTP proxy ip:port (then -listen will be only SOCKS5)")
 	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to")
+	debug := flag.Bool("debug", false, "Enable debug logging for xray-core")
 	flag.Parse()
 
 	if *link == "" || *listen == "" {
@@ -229,7 +251,7 @@ func main() {
 		cfg.Port = port
 	}
 
-	jsonConfig, err := buildXrayConfig(cfg, *listen, *httpSep)
+	jsonConfig, err := buildXrayConfig(cfg, *listen, *httpSep, *debug)
 	if err != nil {
 		log.Fatal("Failed to build configuration:", err)
 	}
@@ -250,9 +272,9 @@ func main() {
 	}
 
 	if *httpSep == "" {
-		log.Printf("Mixed proxy (SOCKS5+HTTP) is running on %s", *listen)
+		log.Printf("Xray started -> Listening on %s (SOCKS5+HTTP)", *listen)
 	} else {
-		log.Printf("SOCKS5 proxy on %s, HTTP proxy on %s", *listen, *httpSep)
+		log.Printf("Xray started -> Listening on %s (SOCKS5) and %s (HTTP)", *listen, *httpSep)
 	}
 
 	sigChan := make(chan os.Signal, 1)
@@ -260,5 +282,5 @@ func main() {
 	<-sigChan
 
 	server.Close()
-	log.Println("Client stopped")
+	log.Println("Xray stopped")
 }
