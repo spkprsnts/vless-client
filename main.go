@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -13,14 +14,17 @@ import (
 	"syscall"
 
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf/serial"
 
 	// Blank imports for xray-core features.
 	// These are required to register the components with the core.
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/log"
+	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
+	_ "github.com/xtls/xray-core/app/stats"
 	_ "github.com/xtls/xray-core/proxy/http"
 	_ "github.com/xtls/xray-core/proxy/socks"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
@@ -188,10 +192,18 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 
 	// Full configuration
 	configJSON := map[string]any{
-		"log":      map[string]any{"loglevel": logLevel},
+		"log":   map[string]any{"loglevel": logLevel},
+		"stats": map[string]any{},
+		"policy": map[string]any{
+			"system": map[string]any{
+				"statsOutboundUplink":   true,
+				"statsOutboundDownlink": true,
+			},
+		},
 		"inbounds": inbounds,
 		"outbounds": []any{
 			map[string]any{
+				"tag":      "proxy",
 				"protocol": "vless",
 				"settings": map[string]any{
 					"vnext": []any{
@@ -221,6 +233,7 @@ func main() {
 	httpSep := flag.String("http", "", "Optional: separate HTTP proxy ip:port (then -listen will be only SOCKS5)")
 	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to")
 	debug := flag.Bool("debug", false, "Enable debug logging for xray-core")
+	metricsListen := flag.String("metrics", "", "Optional: address to expose HTTP metrics endpoint (e.g. 127.0.0.1:8080)")
 	flag.Parse()
 
 	if *link == "" || *listen == "" {
@@ -275,6 +288,37 @@ func main() {
 		log.Printf("Xray started -> Listening on %s (SOCKS5+HTTP)", *listen)
 	} else {
 		log.Printf("Xray started -> Listening on %s (SOCKS5) and %s (HTTP)", *listen, *httpSep)
+	}
+
+	if *metricsListen != "" {
+		go func() {
+			http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+				var rx, tx int64
+
+				// Извлекаем менеджер статистики напрямую из ядра
+				st := server.GetFeature(stats.ManagerType())
+				if sm, ok := st.(stats.Manager); ok {
+					// rx (downlink) - скачано
+					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>downlink"); c != nil {
+						rx = c.Value()
+					}
+					// tx (uplink) - отдано
+					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>uplink"); c != nil {
+						tx = c.Value()
+					}
+				}
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				// Формат, совместимый с wireproxy
+				fmt.Fprintf(w, "tx_bytes=%d\nrx_bytes=%d\n", tx, rx)
+			})
+			if *debug {
+				log.Printf("Metrics API listening on http://%s/metrics", *metricsListen)
+			}
+			if err := http.ListenAndServe(*metricsListen, nil); err != nil {
+				log.Println("Metrics HTTP server error:", err)
+			}
+		}()
 	}
 
 	sigChan := make(chan os.Signal, 1)
