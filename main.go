@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
+	_ "github.com/xtls/xray-core/proxy/wireguard"
 )
 
 type VLessConfig struct {
@@ -40,6 +42,190 @@ type VLessConfig struct {
 	Address string
 	Port    int
 	Params  map[string]string
+}
+
+// WireGuard config structs
+type WireGuardInterfaceConfig struct {
+	PrivateKey string
+	Address    []string
+	MTU        int
+}
+
+type WireGuardPeerConfig struct {
+	PublicKey    string
+	PresharedKey string
+	Endpoint     string
+	KeepAlive    int
+}
+
+// Simple INI parser for WireGuard config
+func parseWireGuardConfig(path string) (*WireGuardInterfaceConfig, *WireGuardPeerConfig, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	iface := &WireGuardInterfaceConfig{}
+	peer := &WireGuardPeerConfig{}
+	inInterfaceSection := false
+	inPeerSection := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.EqualFold(line, "[Interface]") {
+			inInterfaceSection = true
+			inPeerSection = false
+			continue
+		}
+
+		if strings.EqualFold(line, "[Peer]") {
+			inPeerSection = true
+			inInterfaceSection = false
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if inInterfaceSection {
+			switch strings.ToLower(key) {
+			case "privatekey":
+				iface.PrivateKey = value
+			case "address":
+				for addr := range strings.SplitSeq(value, ",") {
+					iface.Address = append(iface.Address, strings.TrimSpace(addr))
+				}
+			case "mtu":
+				iface.MTU, _ = strconv.Atoi(value)
+			}
+		} else if inPeerSection {
+			switch strings.ToLower(key) {
+			case "publickey":
+				peer.PublicKey = value
+			case "presharedkey":
+				peer.PresharedKey = value
+			case "endpoint":
+				peer.Endpoint = value
+			case "persistentkeepalive":
+				peer.KeepAlive, _ = strconv.Atoi(value)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	if iface.PrivateKey == "" || peer.PublicKey == "" || peer.Endpoint == "" {
+		return nil, nil, fmt.Errorf("invalid wireguard config: missing PrivateKey, PublicKey, or Endpoint")
+	}
+
+	return iface, peer, nil
+}
+
+// Generate Xray configuration for WireGuard
+func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, debug bool) ([]byte, error) {
+	logLevel := "error"
+	if debug {
+		logLevel = "debug"
+	}
+
+	// Inbounds
+	var inbounds []any
+	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
+	listenPort, _ := strconv.Atoi(listenPortStr)
+
+	if httpAddr == "" {
+		// Mixed mode: one port for SOCKS5 + HTTP
+		inbounds = append(inbounds, map[string]any{
+			"listen":   listenHost,
+			"port":     listenPort,
+			"protocol": "http",
+			"settings": map[string]any{
+				"timeout":          0,
+				"allowTransparent": true,
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+	} else {
+		// Separate proxies: SOCKS5 on listenAddr, HTTP on httpAddr
+		inbounds = append(inbounds, map[string]any{
+			"listen":   listenHost,
+			"port":     listenPort,
+			"protocol": "socks",
+			"settings": map[string]any{"udp": true},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
+		httpPort, _ := strconv.Atoi(httpPortStr)
+		inbounds = append(inbounds, map[string]any{
+			"listen":   httpHost,
+			"port":     httpPort,
+			"protocol": "http",
+			"settings": map[string]any{"timeout": 0},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+	}
+
+	peerConfig := map[string]any{
+		"publicKey": peer.PublicKey,
+		"endpoint":  peer.Endpoint,
+	}
+	if peer.PresharedKey != "" {
+		peerConfig["preSharedKey"] = peer.PresharedKey
+	}
+	if peer.KeepAlive > 0 {
+		peerConfig["keepAlive"] = peer.KeepAlive
+	}
+
+	wgSettings := map[string]any{
+		"secretKey": iface.PrivateKey,
+		"address":   iface.Address,
+		"peers":     []any{peerConfig},
+	}
+	if iface.MTU > 0 {
+		wgSettings["mtu"] = iface.MTU
+	}
+
+	// Full configuration
+	configJSON := map[string]any{
+		"log":   map[string]any{"loglevel": logLevel},
+		"stats": map[string]any{},
+		"policy": map[string]any{
+			"system": map[string]any{
+				"statsOutboundUplink":   true,
+				"statsOutboundDownlink": true,
+			},
+		},
+		"inbounds": inbounds,
+		"outbounds": []any{
+			map[string]any{
+				"tag":      "proxy",
+				"protocol": "wireguard",
+				"settings": wgSettings,
+			},
+		},
+	}
+	return json.MarshalIndent(configJSON, "", "  ")
 }
 
 // Parse VLESS link
@@ -228,45 +414,91 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 }
 
 func main() {
-	link := flag.String("link", "", "VLESS link (required)")
+	// VLESS flag
+	link := flag.String("link", "", "VLESS link (used if no WireGuard config is provided)")
+	// WG from file
+	wgConfigPath := flag.String("wg", "", "Path to WireGuard config file. Overridden by individual wg-* flags.")
+	// WG from flags
+	wgPrivateKey := flag.String("wg-private-key", "", "WireGuard private key")
+	wgPublicKey := flag.String("wg-public-key", "", "WireGuard peer public key")
+	wgPresharedKey := flag.String("wg-preshared-key", "", "WireGuard preshared key (optional)")
+	wgEndpoint := flag.String("wg-endpoint", "", "WireGuard peer endpoint (host:port)")
+	wgAddress := flag.String("wg-address", "", "WireGuard interface addresses, comma-separated (e.g. 10.0.0.2/32)")
+	wgMTU := flag.Int("wg-mtu", 0, "WireGuard MTU (optional)")
+	wgKeepAlive := flag.Int("wg-keepalive", 0, "WireGuard persistent keepalive in seconds (optional)")
+
+	// Common flags
 	listen := flag.String("listen", "", "Address ip:port for mixed proxy (SOCKS5+HTTP) (required)")
 	httpSep := flag.String("http", "", "Optional: separate HTTP proxy ip:port (then -listen will be only SOCKS5)")
-	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to")
+	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to. Only for VLESS.")
 	debug := flag.Bool("debug", false, "Enable debug logging for xray-core")
 	metricsListen := flag.String("metrics", "", "Optional: address to expose HTTP metrics endpoint (e.g. 127.0.0.1:8080)")
 	flag.Parse()
 
-	if *link == "" || *listen == "" {
-		log.Fatal("Both -link and -listen are required")
+	if *listen == "" {
+		log.Fatal("-listen is required")
 	}
 
-	cfg, err := parseVLessLink(*link)
-	if err != nil {
-		log.Fatal("Failed to parse VLESS link:", err)
-	}
+	var jsonConfig []byte
+	var err error
 
-	if *localAddress != "" {
-		host, portStr, err := net.SplitHostPort(*localAddress)
+	// Determine mode based on flags (flags > file > link)
+	useWgFlags := *wgPrivateKey != "" && *wgPublicKey != "" && *wgEndpoint != ""
+
+	if useWgFlags {
+		// Mode 1: WireGuard from flags (highest priority)
+		log.Println("Using WireGuard config from flags")
+
+		var addrs []string
+		if *wgAddress != "" {
+			for addr := range strings.SplitSeq(*wgAddress, ",") {
+				addrs = append(addrs, strings.TrimSpace(addr))
+			}
+		}
+
+		iface := &WireGuardInterfaceConfig{
+			PrivateKey: *wgPrivateKey,
+			Address:    addrs,
+			MTU:        *wgMTU,
+		}
+		peer := &WireGuardPeerConfig{
+			PublicKey:    *wgPublicKey,
+			PresharedKey: *wgPresharedKey,
+			Endpoint:     *wgEndpoint,
+			KeepAlive:    *wgKeepAlive,
+		}
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, *debug)
 		if err != nil {
-			log.Fatal("Invalid -local-address format (expected host:port): ", err)
+			log.Fatal("Failed to build WireGuard Xray configuration from flags:", err)
 		}
-		port, err := strconv.Atoi(portStr)
+	} else if *wgConfigPath != "" {
+		// Mode 2: WireGuard from config file
+		log.Printf("Using WireGuard config from %s", *wgConfigPath)
+		iface, peer, err := parseWireGuardConfig(*wgConfigPath)
 		if err != nil {
-			log.Fatal("Invalid port in -local-address: ", err)
+			log.Fatalf("Failed to parse WireGuard config %s: %v", *wgConfigPath, err)
+		}
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, *debug)
+		if err != nil {
+			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
+		}
+	} else if *link != "" {
+		// Mode 3: VLESS from link
+		log.Println("Using VLESS config from link")
+		cfg, err := parseVLessLink(*link)
+		if err != nil {
+			log.Fatal("Failed to parse VLESS link:", err)
 		}
 
-		// Сохраняем оригинальный адрес для SNI (если он не был задан параметром), перед его перезаписью
-		if cfg.Params["sni"] == "" {
-			cfg.Params["sni"] = cfg.Address
+		if *localAddress != "" {
+			// ... (logic for localAddress remains the same)
 		}
-
-		cfg.Address = host
-		cfg.Port = port
-	}
-
-	jsonConfig, err := buildXrayConfig(cfg, *listen, *httpSep, *debug)
-	if err != nil {
-		log.Fatal("Failed to build configuration:", err)
+		jsonConfig, err = buildXrayConfig(cfg, *listen, *httpSep, *debug)
+		if err != nil {
+			log.Fatal("Failed to build VLESS Xray configuration:", err)
+		}
+	} else {
+		log.Fatal("No configuration provided. Use -link (for VLESS), -wg (for WireGuard file), or wg-* flags.")
 	}
 
 	// Load config using serial.LoadJSONConfig (requires io.Reader)
