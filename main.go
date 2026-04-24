@@ -483,7 +483,16 @@ func main() {
 		}
 
 		if *localAddress != "" {
-			// ... (logic for localAddress remains the same)
+			host, portStr, err := net.SplitHostPort(*localAddress)
+			if err != nil {
+				log.Fatalf("Invalid -local-address %q: %v", *localAddress, err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				log.Fatalf("Invalid port in -local-address %q: %v", *localAddress, err)
+			}
+			cfg.Address = host
+			cfg.Port = port
 		}
 		jsonConfig, err = buildXrayConfig(cfg, *listen, *httpSep, dnsList, *debug)
 		if err != nil {
