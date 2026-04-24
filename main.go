@@ -137,7 +137,7 @@ func parseWireGuardConfig(path string) (*WireGuardInterfaceConfig, *WireGuardPee
 }
 
 // Generate Xray configuration for WireGuard
-func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, debug bool) ([]byte, error) {
+func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, mixedAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
 	logLevel := "error"
 	if debug {
 		logLevel = "debug"
@@ -148,11 +148,25 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
 	listenPort, _ := strconv.Atoi(listenPortStr)
 
-	if httpAddr == "" {
-		// Mixed mode: one port for SOCKS5 + HTTP
+	// Always: SOCKS5 on listenAddr
+	inbounds = append(inbounds, map[string]any{
+		"listen":   listenHost,
+		"port":     listenPort,
+		"protocol": "socks",
+		"settings": map[string]any{"udp": true},
+		"sniffing": map[string]any{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls"},
+		},
+	})
+
+	// Optional: mixed (SOCKS5+HTTP) on mixedAddr
+	if mixedAddr != "" {
+		mixedHost, mixedPortStr, _ := net.SplitHostPort(mixedAddr)
+		mixedPort, _ := strconv.Atoi(mixedPortStr)
 		inbounds = append(inbounds, map[string]any{
-			"listen":   listenHost,
-			"port":     listenPort,
+			"listen":   mixedHost,
+			"port":     mixedPort,
 			"protocol": "http",
 			"settings": map[string]any{
 				"timeout":          0,
@@ -163,18 +177,10 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 				"destOverride": []string{"http", "tls"},
 			},
 		})
-	} else {
-		// Separate proxies: SOCKS5 on listenAddr, HTTP on httpAddr
-		inbounds = append(inbounds, map[string]any{
-			"listen":   listenHost,
-			"port":     listenPort,
-			"protocol": "socks",
-			"settings": map[string]any{"udp": true},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": []string{"http", "tls"},
-			},
-		})
+	}
+
+	// Optional: HTTP-only on httpAddr
+	if httpAddr != "" {
 		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
 		httpPort, _ := strconv.Atoi(httpPortStr)
 		inbounds = append(inbounds, map[string]any{
@@ -214,7 +220,7 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 		"log":   map[string]any{"loglevel": logLevel},
 		"stats": map[string]any{},
 		"dns": map[string]any{
-			"servers": []string{"8.8.8.8", "1.1.1.1"},
+			"servers": dns,
 		},
 		"policy": map[string]any{
 			"system": map[string]any{
@@ -265,8 +271,7 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 	if len(hostPortAndParams) > 1 {
 		paramsPart := hostPortAndParams[1]
 		paramsAndName := strings.SplitN(paramsPart, "#", 2)
-		paramsList := strings.Split(paramsAndName[0], "&")
-		for _, param := range paramsList {
+		for param := range strings.SplitSeq(paramsAndName[0], "&") {
 			kv := strings.SplitN(param, "=", 2)
 			if len(kv) == 2 {
 				cfg.Params[kv[0]] = kv[1]
@@ -277,7 +282,7 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 }
 
 // Generate Xray configuration
-func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) ([]byte, error) {
+func buildXrayConfig(cfg *VLessConfig, listenAddr, mixedAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
 	logLevel := "error"
 	if debug {
 		logLevel = "debug"
@@ -341,11 +346,25 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
 	listenPort, _ := strconv.Atoi(listenPortStr)
 
-	if httpAddr == "" {
-		// Mixed mode: one port for SOCKS5 + HTTP
+	// Always: SOCKS5 on listenAddr
+	inbounds = append(inbounds, map[string]any{
+		"listen":   listenHost,
+		"port":     listenPort,
+		"protocol": "socks",
+		"settings": map[string]any{"udp": true},
+		"sniffing": map[string]any{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls"},
+		},
+	})
+
+	// Optional: mixed (SOCKS5+HTTP) on mixedAddr
+	if mixedAddr != "" {
+		mixedHost, mixedPortStr, _ := net.SplitHostPort(mixedAddr)
+		mixedPort, _ := strconv.Atoi(mixedPortStr)
 		inbounds = append(inbounds, map[string]any{
-			"listen":   listenHost,
-			"port":     listenPort,
+			"listen":   mixedHost,
+			"port":     mixedPort,
 			"protocol": "http",
 			"settings": map[string]any{
 				"timeout":          0,
@@ -356,18 +375,10 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 				"destOverride": []string{"http", "tls"},
 			},
 		})
-	} else {
-		// Separate proxies: SOCKS5 on listenAddr, HTTP on httpAddr
-		inbounds = append(inbounds, map[string]any{
-			"listen":   listenHost,
-			"port":     listenPort,
-			"protocol": "socks",
-			"settings": map[string]any{"udp": true},
-			"sniffing": map[string]any{
-				"enabled":      true,
-				"destOverride": []string{"http", "tls"},
-			},
-		})
+	}
+
+	// Optional: HTTP-only on httpAddr
+	if httpAddr != "" {
 		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
 		httpPort, _ := strconv.Atoi(httpPortStr)
 		inbounds = append(inbounds, map[string]any{
@@ -387,7 +398,7 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, debug bool) 
 		"log":   map[string]any{"loglevel": logLevel},
 		"stats": map[string]any{},
 		"dns": map[string]any{
-			"servers": []string{"8.8.8.8", "1.1.1.1"},
+			"servers": dns,
 		},
 		"policy": map[string]any{
 			"system": map[string]any{
@@ -437,8 +448,10 @@ func main() {
 	wgKeepAlive := flag.Int("wg-keepalive", 0, "WireGuard persistent keepalive in seconds (optional)")
 
 	// Common flags
-	listen := flag.String("listen", "", "Address ip:port for mixed proxy (SOCKS5+HTTP) (required)")
-	httpSep := flag.String("http", "", "Optional: separate HTTP proxy ip:port (then -listen will be only SOCKS5)")
+	listen := flag.String("listen", "", "Address ip:port for SOCKS5 proxy (required)")
+	mixed := flag.String("mixed", "", "Optional: address ip:port for mixed SOCKS5+HTTP proxy")
+	httpSep := flag.String("http", "", "Optional: address ip:port for HTTP-only proxy")
+	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated list of DNS servers (e.g. 8.8.8.8,1.1.1.1)")
 	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to. Only for VLESS.")
 	debug := flag.Bool("debug", false, "Enable debug logging for xray-core")
 	metricsListen := flag.String("metrics", "", "Optional: address to expose HTTP metrics endpoint (e.g. 127.0.0.1:8080)")
@@ -446,6 +459,13 @@ func main() {
 
 	if *listen == "" {
 		log.Fatal("-listen is required")
+	}
+
+	var dnsList []string
+	for s := range strings.SplitSeq(*dnsServers, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			dnsList = append(dnsList, s)
+		}
 	}
 
 	var jsonConfig []byte
@@ -476,7 +496,7 @@ func main() {
 			Endpoint:     *wgEndpoint,
 			KeepAlive:    *wgKeepAlive,
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, *debug)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *mixed, *httpSep, dnsList, *debug)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from flags:", err)
 		}
@@ -487,7 +507,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to parse WireGuard config %s: %v", *wgConfigPath, err)
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, *debug)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *mixed, *httpSep, dnsList, *debug)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
 		}
@@ -502,7 +522,7 @@ func main() {
 		if *localAddress != "" {
 			// ... (logic for localAddress remains the same)
 		}
-		jsonConfig, err = buildXrayConfig(cfg, *listen, *httpSep, *debug)
+		jsonConfig, err = buildXrayConfig(cfg, *listen, *mixed, *httpSep, dnsList, *debug)
 		if err != nil {
 			log.Fatal("Failed to build VLESS Xray configuration:", err)
 		}
@@ -525,10 +545,12 @@ func main() {
 		log.Fatal("Failed to start Xray:", err)
 	}
 
-	if *httpSep == "" {
-		log.Printf("Xray started -> Listening on %s (SOCKS5+HTTP)", *listen)
-	} else {
-		log.Printf("Xray started -> Listening on %s (SOCKS5) and %s (HTTP)", *listen, *httpSep)
+	log.Printf("Xray started -> SOCKS5 on %s", *listen)
+	if *mixed != "" {
+		log.Printf("                mixed (SOCKS5+HTTP) on %s", *mixed)
+	}
+	if *httpSep != "" {
+		log.Printf("                HTTP on %s", *httpSep)
 	}
 
 	if *metricsListen != "" {
