@@ -517,9 +517,10 @@ func main() {
 		log.Fatal("Failed to start Xray:", err)
 	}
 
-	log.Printf("Xray started -> proxy on %s", *listen)
 	if *httpSep != "" {
-		log.Printf("                HTTP on %s", *httpSep)
+		log.Printf("Xray started -> SOCKS5 on %s, HTTP on %s", *listen, *httpSep)
+	} else {
+		log.Printf("Xray started -> proxy on %s", *listen)
 	}
 
 	if *metricsListen != "" {
