@@ -29,6 +29,7 @@ import (
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/observatory"
 	_ "github.com/xtls/xray-core/app/observatory/burst"
+	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
