@@ -14,7 +14,12 @@ import (
 	"strings"
 	"syscall"
 
+	"context"
+	"time"
+
+	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/extension"
 	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf/serial"
 
@@ -22,6 +27,8 @@ import (
 	// These are required to register the components with the core.
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/log"
+	_ "github.com/xtls/xray-core/app/observatory"
+	_ "github.com/xtls/xray-core/app/observatory/burst"
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
@@ -262,16 +269,8 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 	return cfg, nil
 }
 
-// Generate Xray configuration
-func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
-	logLevel := "error"
-	logAccess := "none"
-	if debug {
-		logLevel = "debug"
-		logAccess = ""
-	}
-
-	// Outbound settings
+// buildVLessOutbound builds a single VLESS outbound map for use in Xray config.
+func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 	security := cfg.Params["security"]
 	if security == "" {
 		security = "tls"
@@ -306,7 +305,6 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 		}
 	}
 
-	// WebSocket
 	if cfg.Params["type"] == "ws" {
 		ws := map[string]any{}
 		if path := cfg.Params["path"]; path != "" {
@@ -317,11 +315,41 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 		}
 		streamSettings["wsSettings"] = ws
 	}
-	// gRPC
 	if cfg.Params["type"] == "grpc" {
 		streamSettings["grpcSettings"] = map[string]any{
 			"serviceName": cfg.Params["serviceName"],
 		}
+	}
+
+	return map[string]any{
+		"tag":      tag,
+		"protocol": "vless",
+		"settings": map[string]any{
+			"vnext": []any{
+				map[string]any{
+					"address": cfg.Address,
+					"port":    cfg.Port,
+					"users": []any{
+						map[string]any{
+							"id":         cfg.UUID,
+							"encryption": cfg.Params["encryption"],
+							"flow":       cfg.Params["flow"],
+						},
+					},
+				},
+			},
+		},
+		"streamSettings": streamSettings,
+	}
+}
+
+// Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
+func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
+	logLevel := "error"
+	logAccess := "none"
+	if debug {
+		logLevel = "debug"
+		logAccess = ""
 	}
 
 	// Inbounds
@@ -329,7 +357,6 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
 	listenPort, _ := strconv.Atoi(listenPortStr)
 
-	// Always: SOCKS5 on listenAddr
 	inbounds = append(inbounds, map[string]any{
 		"listen":   listenHost,
 		"port":     listenPort,
@@ -341,7 +368,6 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 		},
 	})
 
-	// Optional: HTTP on httpAddr
 	if httpAddr != "" {
 		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
 		httpPort, _ := strconv.Atoi(httpPortStr)
@@ -357,7 +383,18 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 		})
 	}
 
-	// Full configuration
+	// Outbounds
+	var outbounds []any
+	var tags []string
+	if len(cfgs) == 1 {
+		outbounds = []any{buildVLessOutbound(cfgs[0], "proxy")}
+	} else {
+		tags = []string{"local", "direct"}
+		for i, cfg := range cfgs {
+			outbounds = append(outbounds, buildVLessOutbound(cfg, tags[i]))
+		}
+	}
+
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
@@ -370,54 +407,59 @@ func buildXrayConfig(cfg *VLessConfig, listenAddr, httpAddr string, dns []string
 				"statsOutboundDownlink": true,
 			},
 		},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{
-				"tag":      "proxy",
-				"protocol": "vless",
-				"settings": map[string]any{
-					"vnext": []any{
-						map[string]any{
-							"address": cfg.Address,
-							"port":    cfg.Port,
-							"users": []any{
-								map[string]any{
-									"id":         cfg.UUID,
-									"encryption": cfg.Params["encryption"],
-									"flow":       cfg.Params["flow"],
-								},
-							},
-						},
-					},
-				},
-				"streamSettings": streamSettings,
-			},
-		},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
 	}
+
+	// Add load balancer with health-check-based selection when two configs are provided.
+	if len(cfgs) > 1 {
+		configJSON["burstObservatory"] = map[string]any{
+			"subjectSelector": tags,
+			"pingConfig": map[string]any{
+				"destination": "http://connectivitycheck.gstatic.com/generate_204",
+				"interval":    "30s",
+				"sampling":    3,
+				"timeout":     "5s",
+			},
+		}
+		configJSON["routing"] = map[string]any{
+			"balancers": []any{
+				map[string]any{
+					"tag":      "balancer",
+					"selector": tags,
+					"strategy": map[string]any{"type": "leastping"},
+				},
+			},
+			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"network":     "tcp,udp",
+					"balancerTag": "balancer",
+				},
+			},
+		}
+	}
+
 	return json.MarshalIndent(configJSON, "", "  ")
 }
 
 func main() {
-	// VLESS flag
-	link := flag.String("link", "", "VLESS link (used if no WireGuard config is provided)")
-	// WG from file
-	wgConfigPath := flag.String("wg", "", "Path to WireGuard config file. Overridden by individual wg-* flags.")
-	// WG from flags
+	link := flag.String("link", "", "VLESS link (vless://...)")
+	wgConfigPath := flag.String("wg", "", "Path to WireGuard .conf file (overridden by wg-* flags)")
 	wgPrivateKey := flag.String("wg-private-key", "", "WireGuard private key")
 	wgPublicKey := flag.String("wg-public-key", "", "WireGuard peer public key")
 	wgPresharedKey := flag.String("wg-preshared-key", "", "WireGuard preshared key (optional)")
-	wgEndpoint := flag.String("wg-endpoint", "", "WireGuard peer endpoint (host:port)")
+	wgEndpoint := flag.String("wg-endpoint", "", "WireGuard peer endpoint host:port")
 	wgAddress := flag.String("wg-address", "", "WireGuard interface addresses, comma-separated (e.g. 10.0.0.2/32)")
 	wgMTU := flag.Int("wg-mtu", 0, "WireGuard MTU (optional)")
 	wgKeepAlive := flag.Int("wg-keepalive", 0, "WireGuard persistent keepalive in seconds (optional)")
-
-	// Common flags
-	listen := flag.String("listen", "", "Proxy listen address ip:port — handles SOCKS5 and HTTP (required)")
-	httpSep := flag.String("http", "", "Optional: separate HTTP proxy ip:port")
-	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated list of DNS servers (e.g. 8.8.8.8,1.1.1.1)")
-	localAddress := flag.String("local-address", "", "Optional: override destination address (host:port) to connect to. Only for VLESS.")
-	debug := flag.Bool("debug", false, "Enable debug logging for xray-core")
-	metricsListen := flag.String("metrics", "", "Optional: address to expose HTTP metrics endpoint (e.g. 127.0.0.1:8080)")
+	listen := flag.String("listen", "", "SOCKS5 proxy listen address ip:port (required)")
+	httpSep := flag.String("http", "", "HTTP proxy listen address ip:port (optional)")
+	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated DNS servers")
+	localAddress := flag.String("local-address", "", "Override VLESS destination to this host:port (local/CDN route)")
+	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
+	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
+	metricsListen := flag.String("metrics", "", "HTTP metrics/status listen address ip:port — exposes /metrics and /status")
 	flag.Parse()
 
 	if *listen == "" {
@@ -476,12 +518,10 @@ func main() {
 		}
 	} else if *link != "" {
 		// Mode 3: VLESS from link
-		log.Println("Using VLESS config from link")
 		cfg, err := parseVLessLink(*link)
 		if err != nil {
 			log.Fatal("Failed to parse VLESS link:", err)
 		}
-
 		if *localAddress != "" {
 			host, portStr, err := net.SplitHostPort(*localAddress)
 			if err != nil {
@@ -494,7 +534,31 @@ func main() {
 			cfg.Address = host
 			cfg.Port = port
 		}
-		jsonConfig, err = buildXrayConfig(cfg, *listen, *httpSep, dnsList, *debug)
+
+		cfgs := []*VLessConfig{cfg}
+
+		if *directAddress != "" {
+			host, portStr, err := net.SplitHostPort(*directAddress)
+			if err != nil {
+				log.Fatalf("Invalid -direct-address %q: %v", *directAddress, err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				log.Fatalf("Invalid port in -direct-address %q: %v", *directAddress, err)
+			}
+			cfg2, err := parseVLessLink(*link)
+			if err != nil {
+				log.Fatal("Failed to parse VLESS link for direct config:", err)
+			}
+			cfg2.Address = host
+			cfg2.Port = port
+			cfgs = append(cfgs, cfg2)
+			log.Printf("Using VLESS with load balancer: local route %s:%d, direct route %s:%d", cfg.Address, cfg.Port, host, port)
+		} else {
+			log.Println("Using VLESS config from link")
+		}
+
+		jsonConfig, err = buildXrayConfig(cfgs, *listen, *httpSep, dnsList, *debug)
 		if err != nil {
 			log.Fatal("Failed to build VLESS Xray configuration:", err)
 		}
@@ -523,30 +587,153 @@ func main() {
 		log.Printf("Xray started -> proxy on %s", *listen)
 	}
 
+	if *directAddress != "" {
+		go func() {
+			prev := ""
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				feat := server.GetFeature(extension.ObservatoryType())
+				obs, ok := feat.(extension.Observatory)
+				if !ok {
+					continue
+				}
+				result, err := obs.GetObservation(context.Background())
+				if err != nil {
+					continue
+				}
+				or, ok := result.(*observatory.ObservationResult)
+				if !ok {
+					continue
+				}
+				active := "none"
+				bestDelay := int64(-1)
+				for _, s := range or.GetStatus() {
+					if s.GetAlive() {
+						d := s.GetDelay()
+						if bestDelay < 0 || d < bestDelay {
+							bestDelay = d
+							active = s.GetOutboundTag()
+						}
+					}
+				}
+				if active != prev {
+					if active == "none" {
+						log.Println("active route: none (both unreachable)")
+					} else {
+						log.Printf("active route: %s (delay %dms)", active, bestDelay)
+					}
+					prev = active
+				}
+			}
+		}()
+	}
+
 	if *metricsListen != "" {
 		go func() {
 			http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 				var rx, tx int64
 
-				// Извлекаем менеджер статистики напрямую из ядра
 				st := server.GetFeature(stats.ManagerType())
 				if sm, ok := st.(stats.Manager); ok {
-					// rx (downlink) - скачано
 					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>downlink"); c != nil {
 						rx = c.Value()
 					}
-					// tx (uplink) - отдано
 					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>uplink"); c != nil {
 						tx = c.Value()
 					}
 				}
 
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				// Формат, совместимый с wireproxy
 				fmt.Fprintf(w, "tx_bytes=%d\nrx_bytes=%d\n", tx, rx)
 			})
+
+			getObservatory := func() extension.Observatory {
+				feat := server.GetFeature(extension.ObservatoryType())
+				obs, _ := feat.(extension.Observatory)
+				return obs
+			}
+
+			http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+				type pingStats struct {
+					AvgMs int64 `json:"avg_ms"`
+					MinMs int64 `json:"min_ms"`
+					MaxMs int64 `json:"max_ms"`
+					Total int64 `json:"total"`
+					Fail  int64 `json:"fail"`
+				}
+				type outboundInfo struct {
+					Tag   string     `json:"tag"`
+					Alive bool       `json:"alive"`
+					Ping  *pingStats `json:"ping,omitempty"`
+				}
+				type statusResponse struct {
+					Outbounds []outboundInfo `json:"outbounds"`
+					Active    string         `json:"active"`
+				}
+
+				resp := statusResponse{Active: "none"}
+
+				if obs := getObservatory(); obs != nil {
+					if result, err := obs.GetObservation(context.Background()); err == nil {
+						if or, ok := result.(*observatory.ObservationResult); ok {
+							bestDelay := int64(-1)
+							for _, s := range or.GetStatus() {
+								info := outboundInfo{
+									Tag:   s.GetOutboundTag(),
+									Alive: s.GetAlive(),
+								}
+								if hp := s.GetHealthPing(); hp != nil {
+									info.Ping = &pingStats{
+										AvgMs: hp.GetAverage() / int64(time.Millisecond),
+										MinMs: hp.GetMin() / int64(time.Millisecond),
+										MaxMs: hp.GetMax() / int64(time.Millisecond),
+										Total: hp.GetAll(),
+										Fail:  hp.GetFail(),
+									}
+								}
+								if s.GetAlive() {
+									delay := s.GetDelay()
+									if bestDelay < 0 || delay < bestDelay {
+										bestDelay = delay
+										resp.Active = s.GetOutboundTag()
+									}
+								}
+								resp.Outbounds = append(resp.Outbounds, info)
+							}
+						}
+					}
+				}
+
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				json.NewEncoder(w).Encode(resp)
+			})
+
+			http.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
+				feat := server.GetFeature(extension.ObservatoryType())
+				obs, ok := feat.(extension.BurstObservatory)
+				if !ok {
+					http.Error(w, `{"error":"not in dual-route mode"}`, http.StatusNotFound)
+					return
+				}
+				n := 1
+				if s := r.URL.Query().Get("n"); s != "" {
+					if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 10 {
+						n = v
+					}
+				}
+				tags := []string{"local", "direct"}
+				go func() {
+					for i := 0; i < n; i++ {
+						obs.Check(tags)
+					}
+				}()
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				fmt.Fprintf(w, `{"status":"check started","rounds":%d}`+"\n", n)
+			})
+
 			if *debug {
-				log.Printf("Metrics API listening on http://%s/metrics", *metricsListen)
+				log.Printf("Metrics API listening on http://%s — /metrics, /status, /check", *metricsListen)
 			}
 			if err := http.ListenAndServe(*metricsListen, nil); err != nil {
 				log.Println("Metrics HTTP server error:", err)

@@ -26,10 +26,32 @@ go build -o vless-client .
 
 ## Usage
 
-### VLESS mode
+### VLESS mode — single route
 
 ```bash
 ./vless-client -link "vless://UUID@host:port?security=reality&..." -listen 127.0.0.1:1080
+```
+
+With a local/CDN address override:
+
+```bash
+./vless-client \
+  -link          "vless://UUID@host:port?security=reality&..." \
+  -local-address 192.168.1.1:443 \
+  -listen        127.0.0.1:1080
+```
+
+### VLESS mode — dual route with load balancer
+
+Connects through both a local/CDN address and the direct server address. Automatically uses whichever is reachable.
+
+```bash
+./vless-client \
+  -link           "vless://UUID@host:port?security=reality&..." \
+  -local-address  192.168.1.1:443 \
+  -direct-address server.example.com:443 \
+  -listen         127.0.0.1:1080 \
+  -metrics        127.0.0.1:8080
 ```
 
 ### WireGuard mode — from a config file
@@ -55,6 +77,8 @@ go build -o vless-client .
 |---|---|---|
 | `-listen` | *(required)* | SOCKS5 proxy listen address `ip:port` |
 | `-link` | | VLESS link (`vless://...`) |
+| `-local-address` | | Override destination `host:port` for VLESS (local/CDN route) |
+| `-direct-address` | | Direct server `host:port`; enables load balancing between local and direct routes |
 | `-wg` | | Path to WireGuard `.conf` file |
 | `-wg-private-key` | | WireGuard private key |
 | `-wg-public-key` | | WireGuard peer public key |
@@ -65,21 +89,35 @@ go build -o vless-client .
 | `-wg-keepalive` | | Persistent keepalive in seconds (optional) |
 | `-http` | | Optional HTTP proxy address `ip:port` |
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
-| `-metrics` | | HTTP metrics endpoint address `ip:port` |
+| `-metrics` | | HTTP metrics/status endpoint address `ip:port` |
 | `-debug` | `false` | Enable xray-core debug logging |
 
 > **Priority (WireGuard):** individual `wg-*` flags > `-wg` config file > `-link` VLESS.
 
-## Metrics
+## Metrics & status
 
-When `-metrics` is set, a lightweight HTTP server exposes traffic counters at `/metrics`:
+When `-metrics` is set, a lightweight HTTP server exposes two endpoints.
+
+### `/metrics` — traffic counters (wireproxy-compatible format)
 
 ```
 tx_bytes=123456
 rx_bytes=654321
 ```
 
-The format is compatible with [wireproxy](https://github.com/pufferffish/wireproxy).
+### `/status` — outbound health (JSON, dual-VLESS mode only)
+
+```json
+{
+  "outbounds": [
+    { "tag": "proxy1", "alive": true,  "delay_ms": 43,  "last_check": "2026-05-02T10:00:00Z", "last_seen": "2026-05-02T10:00:00Z" },
+    { "tag": "proxy2", "alive": false, "last_check": "2026-05-02T10:00:00Z", "error": "..." }
+  ],
+  "active": "proxy1"
+}
+```
+
+`active` is the tag of the currently selected outbound (lowest RTT among alive), or `"none"` if both are unreachable. The first check runs at startup and takes up to 5 seconds.
 
 ## License
 
