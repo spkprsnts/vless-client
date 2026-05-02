@@ -607,9 +607,13 @@ func main() {
 				if !ok {
 					continue
 				}
+				statuses := or.GetStatus()
 				active := "none"
+				if len(statuses) == 0 {
+					active = "pending"
+				}
 				bestDelay := int64(-1)
-				for _, s := range or.GetStatus() {
+				for _, s := range statuses {
 					if s.GetAlive() {
 						d := s.GetDelay()
 						if bestDelay < 0 || d < bestDelay {
@@ -619,9 +623,12 @@ func main() {
 					}
 				}
 				if active != prev {
-					if active == "none" {
+					switch active {
+					case "pending":
+						log.Println("active route: pending (waiting for first check)")
+					case "none":
 						log.Println("active route: none (both unreachable)")
-					} else {
+					default:
 						log.Printf("active route: %s (delay %dms)", active, bestDelay)
 					}
 					prev = active
