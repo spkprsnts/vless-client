@@ -639,16 +639,23 @@ func main() {
 
 	if *metricsListen != "" {
 		go func() {
+			outboundTags := []string{"proxy"}
+			if *directAddress != "" {
+				outboundTags = []string{"local", "direct"}
+			}
+
 			http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 				var rx, tx int64
 
 				st := server.GetFeature(stats.ManagerType())
 				if sm, ok := st.(stats.Manager); ok {
-					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>downlink"); c != nil {
-						rx = c.Value()
-					}
-					if c := sm.GetCounter("outbound>>>proxy>>>traffic>>>uplink"); c != nil {
-						tx = c.Value()
+					for _, tag := range outboundTags {
+						if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>downlink"); c != nil {
+							rx += c.Value()
+						}
+						if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>uplink"); c != nil {
+							tx += c.Value()
+						}
 					}
 				}
 
