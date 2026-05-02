@@ -426,9 +426,10 @@ func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []str
 		configJSON["routing"] = map[string]any{
 			"balancers": []any{
 				map[string]any{
-					"tag":      "balancer",
-					"selector": tags,
-					"strategy": map[string]any{"type": "leastping"},
+					"tag":         "balancer",
+					"selector":    []string{"direct"},
+					"strategy":    map[string]any{"type": "leastping"},
+					"fallbackTag": "local",
 				},
 			},
 			"rules": []any{
@@ -608,28 +609,37 @@ func main() {
 					continue
 				}
 				statuses := or.GetStatus()
-				active := "none"
 				if len(statuses) == 0 {
-					active = "pending"
+					if prev != "pending" {
+						log.Println("active route: pending (waiting for first check)")
+						prev = "pending"
+					}
+					continue
 				}
-				bestDelay := int64(-1)
+
+				// Mirror balancer logic: direct if alive, else fallback to local.
+				alive := make(map[string]int64) // tag → delay
 				for _, s := range statuses {
 					if s.GetAlive() {
-						d := s.GetDelay()
-						if bestDelay < 0 || d < bestDelay {
-							bestDelay = d
-							active = s.GetOutboundTag()
-						}
+						alive[s.GetOutboundTag()] = s.GetDelay()
 					}
 				}
+				active := "local" // fallback
+				if d, ok := alive["direct"]; ok {
+					_ = d
+					active = "direct"
+				}
+
 				if active != prev {
 					switch active {
-					case "pending":
-						log.Println("active route: pending (waiting for first check)")
-					case "none":
-						log.Println("active route: none (both unreachable)")
-					default:
-						log.Printf("active route: %s (delay %dms)", active, bestDelay)
+					case "direct":
+						log.Printf("active route: direct (delay %dms)", alive["direct"])
+					case "local":
+						if d, ok := alive["local"]; ok {
+							log.Printf("active route: local (delay %dms, direct unreachable)", d)
+						} else {
+							log.Println("active route: local (fallback, both unreachable)")
+						}
 					}
 					prev = active
 				}
