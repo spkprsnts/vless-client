@@ -413,11 +413,21 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr stri
 		}
 	}
 
+	var finalDNS = dns
+	if localSocks5 != "" {
+		var tcpDNS []string
+		for _, d := range dns {
+			tcpDNS = append(tcpDNS, "tcp://"+d)
+		}
+		finalDNS = tcpDNS
+		outbounds = append(outbounds, map[string]any{"tag": "dns-out", "protocol": "dns"})
+	}
+
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
 		"dns": map[string]any{
-			"servers": dns,
+			"servers": finalDNS,
 		},
 		"policy": map[string]any{
 			"system": map[string]any{
@@ -427,6 +437,16 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr stri
 		},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
+	}
+
+	var routingRules []any
+	if localSocks5 != "" {
+		routingRules = append(routingRules, map[string]any{
+			"type":        "field",
+			"network":     "udp",
+			"port":        53,
+			"outboundTag": "dns-out",
+		})
 	}
 
 	// Add load balancer with health-check-based selection when two configs are provided.
@@ -450,13 +470,26 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr stri
 					"fallbackTag": "local",
 				},
 			},
-			"rules": []any{
-				map[string]any{
-					"type":        "field",
-					"network":     "tcp,udp",
-					"balancerTag": "balancer",
-				},
-			},
+		}
+		routingRules = append(routingRules, map[string]any{
+			"type":        "field",
+			"network":     "tcp,udp",
+			"balancerTag": "balancer",
+		})
+	} else {
+		routingRules = append(routingRules, map[string]any{
+			"type":        "field",
+			"network":     "tcp,udp",
+			"outboundTag": "proxy",
+		})
+	}
+
+	if r, ok := configJSON["routing"].(map[string]any); ok {
+		r["rules"] = routingRules
+	} else {
+		configJSON["routing"] = map[string]any{
+			"domainStrategy": "AsIs",
+			"rules":          routingRules,
 		}
 	}
 
@@ -506,15 +539,31 @@ func buildSocks5XrayConfig(localSocks5, listenAddr, httpAddr string, dns []strin
 	host, portStr, _ := net.SplitHostPort(localSocks5)
 	port, _ := strconv.Atoi(portStr)
 
+	// Convert standard DNS IPs to TCP DNS to bypass UDP limitations
+	var tcpDNS []string
+	for _, d := range dns {
+		tcpDNS = append(tcpDNS, "tcp://"+d)
+	}
+
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
-		"dns":   map[string]any{"servers": dns},
+		"dns":   map[string]any{"servers": tcpDNS},
 		"policy": map[string]any{
 			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
 		},
-		"inbounds":  inbounds,
-		"outbounds": []any{map[string]any{"tag": "proxy", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": host, "port": port}}, "version": "5"}}},
+		"inbounds": inbounds,
+		"outbounds": []any{
+			map[string]any{"tag": "proxy", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": host, "port": port}}, "version": "5"}},
+			map[string]any{"tag": "dns-out", "protocol": "dns"},
+		},
+		"routing": map[string]any{
+			"domainStrategy": "AsIs",
+			"rules": []any{
+				map[string]any{"type": "field", "network": "udp", "port": 53, "outboundTag": "dns-out"},
+				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
+			},
+		},
 	}
 	return json.MarshalIndent(configJSON, "", "  ")
 }
