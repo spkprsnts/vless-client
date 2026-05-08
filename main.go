@@ -29,7 +29,6 @@ import (
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/observatory"
 	_ "github.com/xtls/xray-core/app/observatory/burst"
-	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
@@ -37,12 +36,13 @@ import (
 	_ "github.com/xtls/xray-core/proxy/http"
 	_ "github.com/xtls/xray-core/proxy/socks"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
+	_ "github.com/xtls/xray-core/proxy/wireguard"
 	_ "github.com/xtls/xray-core/transport/internet/grpc"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
+	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
-	_ "github.com/xtls/xray-core/proxy/wireguard"
 
 	_ "github.com/xtls/xray-core/app/dns"
 	_ "github.com/xtls/xray-core/app/router"
@@ -345,7 +345,7 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -387,7 +387,24 @@ func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []str
 	// Outbounds
 	var outbounds []any
 	var tags []string
-	if len(cfgs) == 1 {
+	if localSocks5 != "" {
+		tags = []string{"local", "direct"}
+		host, portStr, _ := net.SplitHostPort(localSocks5)
+		port, _ := strconv.Atoi(portStr)
+		outbounds = append(outbounds, map[string]any{
+			"tag":      "local",
+			"protocol": "socks",
+			"settings": map[string]any{
+				"servers": []any{
+					map[string]any{"address": host, "port": port},
+				},
+				"version": "5",
+			},
+		})
+
+		// cfgs[0] is the direct VLESS config
+		outbounds = append(outbounds, buildVLessOutbound(cfgs[0], "direct"))
+	} else if len(cfgs) == 1 {
 		outbounds = []any{buildVLessOutbound(cfgs[0], "proxy")}
 	} else {
 		tags = []string{"local", "direct"}
@@ -413,7 +430,7 @@ func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []str
 	}
 
 	// Add load balancer with health-check-based selection when two configs are provided.
-	if len(cfgs) > 1 {
+	if len(tags) > 1 {
 		configJSON["burstObservatory"] = map[string]any{
 			"subjectSelector": tags,
 			"pingConfig": map[string]any{
@@ -424,6 +441,7 @@ func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []str
 			},
 		}
 		configJSON["routing"] = map[string]any{
+			"domainStrategy": "AsIs",
 			"balancers": []any{
 				map[string]any{
 					"tag":         "balancer",
@@ -445,6 +463,62 @@ func buildXrayConfig(cfgs []*VLessConfig, listenAddr, httpAddr string, dns []str
 	return json.MarshalIndent(configJSON, "", "  ")
 }
 
+// Generate Xray configuration for a standalone SOCKS5 upstream proxy
+func buildSocks5XrayConfig(localSocks5, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
+	logLevel := "error"
+	logAccess := "none"
+	if debug {
+		logLevel = "debug"
+		logAccess = ""
+	}
+
+	// Inbounds
+	var inbounds []any
+	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
+	listenPort, _ := strconv.Atoi(listenPortStr)
+
+	inbounds = append(inbounds, map[string]any{
+		"listen":   listenHost,
+		"port":     listenPort,
+		"protocol": "socks",
+		"settings": map[string]any{"udp": true},
+		"sniffing": map[string]any{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls"},
+		},
+	})
+
+	if httpAddr != "" {
+		httpHost, httpPortStr, _ := net.SplitHostPort(httpAddr)
+		httpPort, _ := strconv.Atoi(httpPortStr)
+		inbounds = append(inbounds, map[string]any{
+			"listen":   httpHost,
+			"port":     httpPort,
+			"protocol": "http",
+			"settings": map[string]any{"timeout": 0},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls"},
+			},
+		})
+	}
+
+	host, portStr, _ := net.SplitHostPort(localSocks5)
+	port, _ := strconv.Atoi(portStr)
+
+	configJSON := map[string]any{
+		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
+		"stats": map[string]any{},
+		"dns":   map[string]any{"servers": dns},
+		"policy": map[string]any{
+			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
+		},
+		"inbounds":  inbounds,
+		"outbounds": []any{map[string]any{"tag": "proxy", "protocol": "socks", "settings": map[string]any{"servers": []any{map[string]any{"address": host, "port": port}}, "version": "5"}}},
+	}
+	return json.MarshalIndent(configJSON, "", "  ")
+}
+
 func main() {
 	link := flag.String("link", "", "VLESS link (vless://...)")
 	wgConfigPath := flag.String("wg", "", "Path to WireGuard .conf file (overridden by wg-* flags)")
@@ -460,6 +534,7 @@ func main() {
 	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated DNS servers")
 	localAddress := flag.String("local-address", "", "Override VLESS destination to this host:port (local/CDN route)")
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
+	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy host:port. Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
 	metricsListen := flag.String("metrics", "", "HTTP metrics/status listen address ip:port — exposes /metrics and /status")
 	flag.Parse()
@@ -524,22 +599,19 @@ func main() {
 		if err != nil {
 			log.Fatal("Failed to parse VLESS link:", err)
 		}
-		if *localAddress != "" {
-			host, portStr, err := net.SplitHostPort(*localAddress)
-			if err != nil {
-				log.Fatalf("Invalid -local-address %q: %v", *localAddress, err)
-			}
-			port, err := strconv.Atoi(portStr)
-			if err != nil {
-				log.Fatalf("Invalid port in -local-address %q: %v", *localAddress, err)
-			}
-			cfg.Address = host
-			cfg.Port = port
-		}
+		var cfgs []*VLessConfig
 
-		cfgs := []*VLessConfig{cfg}
-
-		if *directAddress != "" {
+		if *localSocks5 != "" {
+			if *directAddress == "" {
+				log.Fatal("When used with -link, -local-socks5 requires -direct-address to be specified for load balancing")
+			}
+			if *localAddress != "" {
+				log.Fatal("-local-socks5 and -local-address cannot be used together")
+			}
+			_, _, err := net.SplitHostPort(*localSocks5)
+			if err != nil {
+				log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
+			}
 			host, portStr, err := net.SplitHostPort(*directAddress)
 			if err != nil {
 				log.Fatalf("Invalid -direct-address %q: %v", *directAddress, err)
@@ -548,24 +620,65 @@ func main() {
 			if err != nil {
 				log.Fatalf("Invalid port in -direct-address %q: %v", *directAddress, err)
 			}
-			cfg2, err := parseVLessLink(*link)
-			if err != nil {
-				log.Fatal("Failed to parse VLESS link for direct config:", err)
-			}
-			cfg2.Address = host
-			cfg2.Port = port
-			cfgs = append(cfgs, cfg2)
-			log.Printf("Using VLESS with load balancer: local route %s:%d, direct route %s:%d", cfg.Address, cfg.Port, host, port)
+			cfg.Address = host
+			cfg.Port = port
+			cfgs = []*VLessConfig{cfg}
+			log.Printf("Using load balancer: SOCKS5 local route %s, VLESS direct route %s:%d", *localSocks5, host, port)
 		} else {
-			log.Println("Using VLESS config from link")
+			if *localAddress != "" {
+				host, portStr, err := net.SplitHostPort(*localAddress)
+				if err != nil {
+					log.Fatalf("Invalid -local-address %q: %v", *localAddress, err)
+				}
+				port, err := strconv.Atoi(portStr)
+				if err != nil {
+					log.Fatalf("Invalid port in -local-address %q: %v", *localAddress, err)
+				}
+				cfg.Address = host
+				cfg.Port = port
+			}
+
+			cfgs = []*VLessConfig{cfg}
+
+			if *directAddress != "" {
+				host, portStr, err := net.SplitHostPort(*directAddress)
+				if err != nil {
+					log.Fatalf("Invalid -direct-address %q: %v", *directAddress, err)
+				}
+				port, err := strconv.Atoi(portStr)
+				if err != nil {
+					log.Fatalf("Invalid port in -direct-address %q: %v", *directAddress, err)
+				}
+				cfg2, err := parseVLessLink(*link)
+				if err != nil {
+					log.Fatal("Failed to parse VLESS link for direct config:", err)
+				}
+				cfg2.Address = host
+				cfg2.Port = port
+				cfgs = append(cfgs, cfg2)
+				log.Printf("Using VLESS with load balancer: local route %s:%d, direct route %s:%d", cfg.Address, cfg.Port, host, port)
+			} else {
+				log.Println("Using VLESS config from link")
+			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, *listen, *httpSep, dnsList, *debug)
+		jsonConfig, err = buildXrayConfig(cfgs, *localSocks5, *listen, *httpSep, dnsList, *debug)
 		if err != nil {
 			log.Fatal("Failed to build VLESS Xray configuration:", err)
 		}
+	} else if *localSocks5 != "" {
+		// Mode 4: Standalone SOCKS5 proxy
+		log.Printf("Using standalone SOCKS5 upstream from %s", *localSocks5)
+		_, _, err := net.SplitHostPort(*localSocks5)
+		if err != nil {
+			log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
+		}
+		jsonConfig, err = buildSocks5XrayConfig(*localSocks5, *listen, *httpSep, dnsList, *debug)
+		if err != nil {
+			log.Fatal("Failed to build SOCKS5 Xray configuration:", err)
+		}
 	} else {
-		log.Fatal("No configuration provided. Use -link (for VLESS), -wg (for WireGuard file), or wg-* flags.")
+		log.Fatal("No configuration provided. Use -link (for VLESS), -wg (for WireGuard file), wg-* flags, or -local-socks5.")
 	}
 
 	// Load config using serial.LoadJSONConfig (requires io.Reader)

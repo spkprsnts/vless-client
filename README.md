@@ -8,10 +8,13 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 - **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
+- **Standalone SOCKS5** upstream proxy mode
+- **Dual-route** mode with automatic failover and load balancing
 - SOCKS5 proxy (always on)
 - Optional HTTP proxy on a separate port
 - Configurable DNS servers
 - HTTP metrics endpoint (`/metrics`) in wireproxy-compatible format
+- Health check endpoints (`/status`, `/check`) for monitoring
 - Debug logging via flag
 
 ## Installation
@@ -71,6 +74,26 @@ Connects through both a local/CDN address and the direct server address. Automat
   -listen         127.0.0.1:1080
 ```
 
+## Usage (continued)
+
+### Standalone SOCKS5 upstream mode
+
+Use an existing SOCKS5 proxy as the upstream:
+
+```bash
+./vless-client \
+  -local-socks5   127.0.0.1:1081 \
+  -listen         127.0.0.1:1080
+```
+
+### VLESS mode — dual route with local SOCKS5 upstream
+
+Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically uses whichever is reachable.
+
+```bash
+./vless-client   -link           "vless://UUID@host:port?security=reality&..."   -local-socks5   127.0.0.1:1081   -direct-address server.example.com:443   -listen         127.0.0.1:1080   -metrics        127.0.0.1:8080
+```
+
 ## Flags
 
 | Flag | Default | Description |
@@ -79,6 +102,7 @@ Connects through both a local/CDN address and the direct server address. Automat
 | `-link` | | VLESS link (`vless://...`) |
 | `-local-address` | | Override destination `host:port` for VLESS (local/CDN route) |
 | `-direct-address` | | Direct server `host:port`; enables load balancing between local and direct routes |
+| `-local-socks5` | | Local SOCKS5 proxy `host:port`. Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set |
 | `-wg` | | Path to WireGuard `.conf` file |
 | `-wg-private-key` | | WireGuard private key |
 | `-wg-public-key` | | WireGuard peer public key |
@@ -96,7 +120,7 @@ Connects through both a local/CDN address and the direct server address. Automat
 
 ## Metrics & status
 
-When `-metrics` is set, a lightweight HTTP server exposes two endpoints.
+When `-metrics` is set, a lightweight HTTP server exposes three endpoints.
 
 ### `/metrics` — traffic counters (wireproxy-compatible format)
 
@@ -105,19 +129,52 @@ tx_bytes=123456
 rx_bytes=654321
 ```
 
-### `/status` — outbound health (JSON, dual-VLESS mode only)
+### `/status` — outbound health (JSON, dual-route mode only)
 
 ```json
 {
   "outbounds": [
-    { "tag": "proxy1", "alive": true,  "delay_ms": 43,  "last_check": "2026-05-02T10:00:00Z", "last_seen": "2026-05-02T10:00:00Z" },
-    { "tag": "proxy2", "alive": false, "last_check": "2026-05-02T10:00:00Z", "error": "..." }
+    {
+      "tag": "local",
+      "alive": true,
+      "ping": {
+        "avg_ms": 45,
+        "min_ms": 42,
+        "max_ms": 50,
+        "total": 10,
+        "fail": 0
+      }
+    },
+    {
+      "tag": "direct",
+      "alive": false,
+      "ping": {
+        "avg_ms": 0,
+        "min_ms": 0,
+        "max_ms": 0,
+        "total": 10,
+        "fail": 10
+      }
+    }
   ],
-  "active": "proxy1"
+  "active": "local"
 }
 ```
 
 `active` is the tag of the currently selected outbound (lowest RTT among alive), or `"none"` if both are unreachable. The first check runs at startup and takes up to 5 seconds.
+
+### `/check` — trigger manual health checks (dual-route mode only)
+
+Triggers `n` rounds of health checks for both routes (default 1, max 10).
+
+```
+GET /check?n=3
+```
+
+Response:
+```json
+{"status":"check started","rounds":3}
+```
 
 ## License
 
