@@ -38,7 +38,9 @@ import (
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
 	_ "github.com/xtls/xray-core/proxy/wireguard"
 	_ "github.com/xtls/xray-core/transport/internet/grpc"
+	_ "github.com/xtls/xray-core/transport/internet/httpupgrade"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
+	_ "github.com/xtls/xray-core/transport/internet/splithttp"
 	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
@@ -320,6 +322,26 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 		streamSettings["grpcSettings"] = map[string]any{
 			"serviceName": cfg.Params["serviceName"],
 		}
+	}
+
+	if cfg.Params["type"] == "xhttp" {
+		xhttp := map[string]any{}
+		if path := cfg.Params["path"]; path != "" {
+			xhttp["path"] = path
+		}
+		if host := cfg.Params["host"]; host != "" {
+			xhttp["host"] = host
+		}
+		if mode := cfg.Params["mode"]; mode != "" {
+			xhttp["mode"] = mode
+		}
+		if extra := cfg.Params["extra"]; extra != "" {
+			var extraMap map[string]string
+			if err := json.Unmarshal([]byte(extra), &extraMap); err == nil {
+				xhttp["extra"] = extraMap
+			}
+		}
+		streamSettings["xhttpSettings"] = xhttp
 	}
 
 	return map[string]any{

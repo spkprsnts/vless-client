@@ -6,7 +6,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 ## Features
 
-- **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP
+- **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
