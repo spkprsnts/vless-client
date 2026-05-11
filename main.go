@@ -367,7 +367,7 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr string, dns []string, debug bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr string, dns []string, debug bool, hcInterval int) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -477,7 +477,7 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, listenAddr, httpAddr stri
 			"subjectSelector": tags,
 			"pingConfig": map[string]any{
 				"destination": "http://connectivitycheck.gstatic.com/generate_204",
-				"interval":    "30s",
+				"interval":    fmt.Sprintf("%ds", hcInterval),
 				"sampling":    3,
 				"timeout":     "5s",
 			},
@@ -606,6 +606,7 @@ func main() {
 	localAddress := flag.String("local-address", "", "Override VLESS destination to this host:port (local/CDN route)")
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy host:port. Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set")
+	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
 	metricsListen := flag.String("metrics", "", "HTTP metrics/status listen address ip:port — exposes /metrics and /status")
 	flag.Parse()
@@ -733,7 +734,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, *localSocks5, *listen, *httpSep, dnsList, *debug)
+		jsonConfig, err = buildXrayConfig(cfgs, *localSocks5, *listen, *httpSep, dnsList, *debug, *hcInterval)
 		if err != nil {
 			log.Fatal("Failed to build VLESS Xray configuration:", err)
 		}
