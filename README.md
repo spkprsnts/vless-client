@@ -140,7 +140,7 @@ Connect through an upstream SOCKS5 that requires auth:
 | `-wg-keepalive` | | Persistent keepalive in seconds (optional) |
 | `-http` | | Optional HTTP proxy address `ip:port` |
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
-| `-metrics` | | HTTP metrics/status endpoint address `ip:port` |
+| `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
 | `-proxy-user` | | Username for the exposed SOCKS5/HTTP proxy |
 | `-proxy-pass` | | Password for the exposed SOCKS5/HTTP proxy |
@@ -148,62 +148,46 @@ Connect through an upstream SOCKS5 that requires auth:
 
 > **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.
 
-## Metrics & status
+## Stats socket
 
-When `-metrics` is set, a lightweight HTTP server exposes three endpoints.
+When `-stats-socket` is set, vless-client listens on a Linux abstract Unix domain socket. Only processes with the same UID can connect — other Android apps are rejected at the OS level via `SO_PEERCRED`.
 
-### `/metrics` — traffic counters (wireproxy-compatible format)
-
-```
-tx_bytes=123456
-rx_bytes=654321
+```bash
+./vless-client -link "vless://..." -listen 127.0.0.1:1080 -stats-socket vless-client
 ```
 
-### `/status` — outbound health (JSON, dual-route mode only)
+### Protocol
+
+Send a single command line, receive a compact JSON response, connection closes.
+
+**`stats`** — traffic counters
 
 ```json
-{
-  "outbounds": [
-    {
-      "tag": "local",
-      "alive": true,
-      "ping": {
-        "avg_ms": 45,
-        "min_ms": 42,
-        "max_ms": 50,
-        "total": 10,
-        "fail": 0
-      }
-    },
-    {
-      "tag": "direct",
-      "alive": false,
-      "ping": {
-        "avg_ms": 0,
-        "min_ms": 0,
-        "max_ms": 0,
-        "total": 10,
-        "fail": 10
-      }
-    }
-  ],
-  "active": "local"
-}
+{"tx_bytes":123456,"rx_bytes":654321}
 ```
 
-`active` is the tag of the currently selected outbound (lowest RTT among alive), or `"none"` if both are unreachable. The first check runs at startup and takes up to 5 seconds.
+**`status`** — outbound health (dual-route mode)
 
-### `/check` — trigger manual health checks (dual-route mode only)
-
-Triggers `n` rounds of health checks for both routes (default 1, max 10).
-
-```
-GET /check?n=3
+```json
+{"outbounds":[{"tag":"local","alive":true,"ping":{"avg_ms":45,"min_ms":42,"max_ms":50,"total":10,"fail":0}},{"tag":"direct","alive":false,"ping":{"avg_ms":0,"min_ms":0,"max_ms":0,"total":10,"fail":10}}],"active":"local"}
 ```
 
-Response:
+`active` is the tag with the lowest RTT among alive outbounds, or `"none"` if both are unreachable.
+
+**`check [n]`** — trigger manual health checks (dual-route mode, default 1 round, max 10)
+
 ```json
 {"status":"check started","rounds":3}
+```
+
+### Android usage
+
+```kotlin
+val socket = LocalSocket()
+socket.connect(LocalSocketAddress("vless-client", LocalSocketAddress.Namespace.ABSTRACT))
+val response = socket.inputStream.bufferedReader().readLine()
+socket.close()
+// response: {"tx_bytes":123,"rx_bytes":456}
 ```
 
 ## License

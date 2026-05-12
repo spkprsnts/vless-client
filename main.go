@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -20,7 +19,6 @@ import (
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/extension"
-	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf/serial"
 
 	// Blank imports for xray-core features.
@@ -587,7 +585,7 @@ func main() {
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set")
 	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
-	metricsListen := flag.String("metrics", "", "HTTP metrics/status listen address ip:port — exposes /metrics and /status")
+	statsSocket := flag.String("stats-socket", "", "Abstract Unix socket name for stats/status/check (Android/Linux only, e.g. vless-client)")
 	proxyUser := flag.String("proxy-user", "", "SOCKS5/HTTP proxy username (optional)")
 	proxyPass := flag.String("proxy-pass", "", "SOCKS5/HTTP proxy password (optional)")
 	flag.Parse()
@@ -826,124 +824,11 @@ func main() {
 		}()
 	}
 
-	if *metricsListen != "" {
-		go func() {
-			outboundTags := []string{"proxy"}
-			if *directAddress != "" {
-				outboundTags = []string{"local", "direct"}
-			}
-
-			http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-				var rx, tx int64
-
-				st := server.GetFeature(stats.ManagerType())
-				if sm, ok := st.(stats.Manager); ok {
-					for _, tag := range outboundTags {
-						if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>downlink"); c != nil {
-							rx += c.Value()
-						}
-						if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>uplink"); c != nil {
-							tx += c.Value()
-						}
-					}
-				}
-
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				fmt.Fprintf(w, "tx_bytes=%d\nrx_bytes=%d\n", tx, rx)
-			})
-
-			getObservatory := func() extension.Observatory {
-				feat := server.GetFeature(extension.ObservatoryType())
-				obs, _ := feat.(extension.Observatory)
-				return obs
-			}
-
-			http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-				type pingStats struct {
-					AvgMs int64 `json:"avg_ms"`
-					MinMs int64 `json:"min_ms"`
-					MaxMs int64 `json:"max_ms"`
-					Total int64 `json:"total"`
-					Fail  int64 `json:"fail"`
-				}
-				type outboundInfo struct {
-					Tag   string     `json:"tag"`
-					Alive bool       `json:"alive"`
-					Ping  *pingStats `json:"ping,omitempty"`
-				}
-				type statusResponse struct {
-					Outbounds []outboundInfo `json:"outbounds"`
-					Active    string         `json:"active"`
-				}
-
-				resp := statusResponse{Active: "none"}
-
-				if obs := getObservatory(); obs != nil {
-					if result, err := obs.GetObservation(context.Background()); err == nil {
-						if or, ok := result.(*observatory.ObservationResult); ok {
-							bestDelay := int64(-1)
-							for _, s := range or.GetStatus() {
-								info := outboundInfo{
-									Tag:   s.GetOutboundTag(),
-									Alive: s.GetAlive(),
-								}
-								if hp := s.GetHealthPing(); hp != nil {
-									info.Ping = &pingStats{
-										AvgMs: hp.GetAverage() / int64(time.Millisecond),
-										MinMs: hp.GetMin() / int64(time.Millisecond),
-										MaxMs: hp.GetMax() / int64(time.Millisecond),
-										Total: hp.GetAll(),
-										Fail:  hp.GetFail(),
-									}
-								}
-								if s.GetAlive() {
-									delay := s.GetDelay()
-									if bestDelay < 0 || delay < bestDelay {
-										bestDelay = delay
-										resp.Active = s.GetOutboundTag()
-									}
-								}
-								resp.Outbounds = append(resp.Outbounds, info)
-							}
-						}
-					}
-				}
-
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
-				json.NewEncoder(w).Encode(resp)
-			})
-
-			http.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
-				feat := server.GetFeature(extension.ObservatoryType())
-				obs, ok := feat.(extension.BurstObservatory)
-				if !ok {
-					http.Error(w, `{"error":"not in dual-route mode"}`, http.StatusNotFound)
-					return
-				}
-				n := 1
-				if s := r.URL.Query().Get("n"); s != "" {
-					if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 10 {
-						n = v
-					}
-				}
-				tags := []string{"local", "direct"}
-				go func() {
-					for i := 0; i < n; i++ {
-						obs.Check(tags)
-					}
-				}()
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
-				fmt.Fprintf(w, `{"status":"check started","rounds":%d}`+"\n", n)
-			})
-
-			if *debug {
-				log.Printf("Metrics API listening on http://%s — /metrics, /status, /check", *metricsListen)
-			}
-			if err := http.ListenAndServe(*metricsListen, nil); err != nil {
-				log.Println("Metrics HTTP server error:", err)
-			}
-		}()
+	outboundTags := []string{"proxy"}
+	if *directAddress != "" {
+		outboundTags = []string{"local", "direct"}
 	}
+	startStatsSocket(*statsSocket, server, outboundTags)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
