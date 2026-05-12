@@ -29,7 +29,7 @@ go build -o vless-client .
 
 ## Usage
 
-### VLESS mode — single route
+### VLESS — single route
 
 ```bash
 ./vless-client -link "vless://UUID@host:port?security=reality&..." -listen 127.0.0.1:1080
@@ -44,9 +44,9 @@ With a local/CDN address override:
   -listen        127.0.0.1:1080
 ```
 
-### VLESS mode — dual route with load balancer
+### VLESS — dual route with load balancer
 
-Connects through both a local/CDN address and the direct server address. Automatically uses whichever is reachable.
+Connects through both a local/CDN address and the direct server address. Automatically uses whichever is reachable (lowest RTT).
 
 ```bash
 ./vless-client \
@@ -57,13 +57,36 @@ Connects through both a local/CDN address and the direct server address. Automat
   -metrics        127.0.0.1:8080
 ```
 
-### WireGuard mode — from a config file
+### VLESS — dual route with local SOCKS5 upstream
+
+Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically uses whichever is reachable.
+
+```bash
+./vless-client \
+  -link           "vless://UUID@host:port?security=reality&..." \
+  -local-socks5   127.0.0.1:1081 \
+  -direct-address server.example.com:443 \
+  -listen         127.0.0.1:1080 \
+  -metrics        127.0.0.1:8080
+```
+
+### Standalone SOCKS5 upstream
+
+Use an existing SOCKS5 proxy as the upstream without any tunnel:
+
+```bash
+./vless-client \
+  -local-socks5 127.0.0.1:1081 \
+  -listen       127.0.0.1:1080
+```
+
+### WireGuard — from a config file
 
 ```bash
 ./vless-client -wg /etc/wireguard/wg0.conf -listen 127.0.0.1:1080
 ```
 
-### WireGuard mode — from flags
+### WireGuard — from flags
 
 ```bash
 ./vless-client \
@@ -72,26 +95,6 @@ Connects through both a local/CDN address and the direct server address. Automat
   -wg-endpoint    vpn.example.com:51820 \
   -wg-address     10.0.0.2/32 \
   -listen         127.0.0.1:1080
-```
-
-## Usage (continued)
-
-### Standalone SOCKS5 upstream mode
-
-Use an existing SOCKS5 proxy as the upstream:
-
-```bash
-./vless-client \
-  -local-socks5   127.0.0.1:1081 \
-  -listen         127.0.0.1:1080
-```
-
-### VLESS mode — dual route with local SOCKS5 upstream
-
-Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically uses whichever is reachable.
-
-```bash
-./vless-client   -link           "vless://UUID@host:port?security=reality&..."   -local-socks5   127.0.0.1:1081   -direct-address server.example.com:443   -listen         127.0.0.1:1080   -metrics        127.0.0.1:8080
 ```
 
 ## Flags
@@ -114,9 +117,10 @@ Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically
 | `-http` | | Optional HTTP proxy address `ip:port` |
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
 | `-metrics` | | HTTP metrics/status endpoint address `ip:port` |
+| `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
 | `-debug` | `false` | Enable xray-core debug logging |
 
-> **Priority (WireGuard):** individual `wg-*` flags > `-wg` config file > `-link` VLESS.
+> **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.
 
 ## Metrics & status
 
