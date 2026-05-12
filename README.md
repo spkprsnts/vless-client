@@ -12,6 +12,8 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - **Dual-route** mode with automatic failover and load balancing
 - SOCKS5 proxy (always on)
 - Optional HTTP proxy on a separate port
+- Optional username/password auth on exposed SOCKS5 and HTTP proxies
+- Authenticated upstream SOCKS5 (`user:pass@host:port`)
 - Configurable DNS servers
 - HTTP metrics endpoint (`/metrics`) in wireproxy-compatible format
 - Health check endpoints (`/status`, `/check`) for monitoring
@@ -97,6 +99,28 @@ Use an existing SOCKS5 proxy as the upstream without any tunnel:
   -listen         127.0.0.1:1080
 ```
 
+### Authentication
+
+Protect the exposed proxy with a username and password:
+
+```bash
+./vless-client \
+  -link       "vless://UUID@host:port?security=reality&..." \
+  -listen     127.0.0.1:1080 \
+  -proxy-user alice \
+  -proxy-pass secret
+```
+
+Both SOCKS5 and HTTP (`-http`) inbounds use the same credentials. Works with any mode (VLESS, WireGuard, standalone SOCKS5).
+
+Connect through an upstream SOCKS5 that requires auth:
+
+```bash
+./vless-client \
+  -local-socks5 alice:secret@127.0.0.1:1081 \
+  -listen       127.0.0.1:1080
+```
+
 ## Flags
 
 | Flag | Default | Description |
@@ -105,7 +129,7 @@ Use an existing SOCKS5 proxy as the upstream without any tunnel:
 | `-link` | | VLESS link (`vless://...`) |
 | `-local-address` | | Override destination `host:port` for VLESS (local/CDN route) |
 | `-direct-address` | | Direct server `host:port`; enables load balancing between local and direct routes |
-| `-local-socks5` | | Local SOCKS5 proxy `host:port`. Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set |
+| `-local-socks5` | | Local SOCKS5 proxy `[user:pass@]host:port`. Used as standalone upstream, or as the local route when `-link` and `-direct-address` are also set |
 | `-wg` | | Path to WireGuard `.conf` file |
 | `-wg-private-key` | | WireGuard private key |
 | `-wg-public-key` | | WireGuard peer public key |
@@ -118,6 +142,8 @@ Use an existing SOCKS5 proxy as the upstream without any tunnel:
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
 | `-metrics` | | HTTP metrics/status endpoint address `ip:port` |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
+| `-proxy-user` | | Username for the exposed SOCKS5/HTTP proxy |
+| `-proxy-pass` | | Password for the exposed SOCKS5/HTTP proxy |
 | `-debug` | `false` | Enable xray-core debug logging |
 
 > **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.
