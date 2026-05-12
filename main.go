@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -282,10 +283,13 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 	if len(hostPortAndParams) > 1 {
 		paramsPart := hostPortAndParams[1]
 		paramsAndName := strings.SplitN(paramsPart, "#", 2)
-		for param := range strings.SplitSeq(paramsAndName[0], "&") {
-			kv := strings.SplitN(param, "=", 2)
-			if len(kv) == 2 {
-				cfg.Params[kv[0]] = kv[1]
+		parsed, err := url.ParseQuery(paramsAndName[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid query params: %v", err)
+		}
+		for k, v := range parsed {
+			if len(v) > 0 {
+				cfg.Params[k] = v[0]
 			}
 		}
 	}
@@ -356,7 +360,7 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 			xhttp["mode"] = mode
 		}
 		if extra := cfg.Params["extra"]; extra != "" {
-			var extraMap map[string]string
+			var extraMap map[string]any
 			if err := json.Unmarshal([]byte(extra), &extraMap); err == nil {
 				xhttp["extra"] = extraMap
 			}
