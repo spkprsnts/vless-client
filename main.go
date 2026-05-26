@@ -309,55 +309,104 @@ func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[st
 		streamSettings["network"] = "tcp"
 	}
 
+	sni := cfg.Params["sni"]
+	if sni == "" {
+		sni = cfg.Address
+	}
+
 	switch security {
 	case "tls":
 		streamSettings["security"] = "tls"
 		tlsSettings := map[string]any{
-			"serverName": cfg.Params["sni"],
+			"serverName":  sni,
+			"fingerprint": cfg.Params["fp"],
 		}
-		if cfg.Params["sni"] == "" {
-			tlsSettings["serverName"] = cfg.Address
+		if alpn := cfg.Params["alpn"]; alpn != "" {
+			tlsSettings["alpn"] = strings.Split(alpn, ",")
 		}
-		if fp := cfg.Params["fp"]; fp != "" {
-			tlsSettings["fingerprint"] = fp
+		if v := cfg.Params["allowInsecure"]; v == "1" || v == "true" {
+			tlsSettings["allowInsecure"] = true
 		}
 		streamSettings["tlsSettings"] = tlsSettings
 	case "reality":
 		streamSettings["security"] = "reality"
-		streamSettings["realitySettings"] = map[string]any{
-			"serverName":  cfg.Params["sni"],
+		realitySettings := map[string]any{
+			"serverName":  sni,
 			"fingerprint": cfg.Params["fp"],
 			"publicKey":   cfg.Params["pbk"],
 			"shortId":     cfg.Params["sid"],
 		}
+		if spx := cfg.Params["spx"]; spx != "" {
+			realitySettings["spiderX"] = spx
+		}
+		streamSettings["realitySettings"] = realitySettings
 	}
 
-	if cfg.Params["type"] == "ws" {
+	// parseHeaders decodes a JSON headers object from a URL param (e.g. headers={"X-Foo":"bar"}).
+	parseHeaders := func(raw string) map[string]string {
+		var h map[string]string
+		_ = json.Unmarshal([]byte(raw), &h)
+		return h
+	}
+
+	switch cfg.Params["type"] {
+	case "ws":
 		ws := map[string]any{}
-		if path := cfg.Params["path"]; path != "" {
-			ws["path"] = path
+		if v := cfg.Params["path"]; v != "" {
+			ws["path"] = v
 		}
-		if host := cfg.Params["host"]; host != "" {
-			ws["headers"] = map[string]string{"Host": host}
+		if v := cfg.Params["host"]; v != "" {
+			ws["host"] = v
+		}
+		if v := cfg.Params["headers"]; v != "" {
+			if h := parseHeaders(v); len(h) > 0 {
+				ws["headers"] = h
+			}
 		}
 		streamSettings["wsSettings"] = ws
-	}
-	if cfg.Params["type"] == "grpc" {
-		streamSettings["grpcSettings"] = map[string]any{
+
+	case "grpc":
+		grpc := map[string]any{
 			"serviceName": cfg.Params["serviceName"],
 		}
-	}
+		if v := cfg.Params["authority"]; v != "" {
+			grpc["authority"] = v
+		}
+		if v := cfg.Params["multiMode"]; v == "1" || v == "true" {
+			grpc["multiMode"] = true
+		}
+		streamSettings["grpcSettings"] = grpc
 
-	if cfg.Params["type"] == "xhttp" {
+	case "httpupgrade":
+		hu := map[string]any{}
+		if v := cfg.Params["path"]; v != "" {
+			hu["path"] = v
+		}
+		if v := cfg.Params["host"]; v != "" {
+			hu["host"] = v
+		}
+		if v := cfg.Params["headers"]; v != "" {
+			if h := parseHeaders(v); len(h) > 0 {
+				hu["headers"] = h
+			}
+		}
+		streamSettings["httpupgradeSettings"] = hu
+
+	case "xhttp", "splithttp":
 		xhttp := map[string]any{}
-		if path := cfg.Params["path"]; path != "" {
-			xhttp["path"] = path
+		if v := cfg.Params["path"]; v != "" {
+			xhttp["path"] = v
 		}
-		if host := cfg.Params["host"]; host != "" {
-			xhttp["host"] = host
+		if v := cfg.Params["host"]; v != "" {
+			xhttp["host"] = v
 		}
-		if mode := cfg.Params["mode"]; mode != "" {
-			xhttp["mode"] = mode
+		if v := cfg.Params["mode"]; v != "" {
+			xhttp["mode"] = v
+		}
+		if v := cfg.Params["headers"]; v != "" {
+			if h := parseHeaders(v); len(h) > 0 {
+				xhttp["headers"] = h
+			}
 		}
 		if extra := cfg.Params["extra"]; extra != "" {
 			var extraMap map[string]any
