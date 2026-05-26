@@ -297,7 +297,7 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 }
 
 // buildVLessOutbound builds a single VLESS outbound map for use in Xray config.
-func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
+func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[string]any {
 	security := cfg.Params["security"]
 	if security == "" {
 		security = "tls"
@@ -368,7 +368,7 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 		streamSettings["xhttpSettings"] = xhttp
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"tag":      tag,
 		"protocol": "vless",
 		"settings": map[string]any{
@@ -388,10 +388,17 @@ func buildVLessOutbound(cfg *VLessConfig, tag string) map[string]any {
 		},
 		"streamSettings": streamSettings,
 	}
+	if muxConcurrency > 0 {
+		out["mux"] = map[string]any{
+			"enabled":     true,
+			"concurrency": muxConcurrency,
+		}
+	}
+	return out
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*VLessConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval int, authUser, authPass string) ([]byte, error) {
+func buildXrayConfig(cfgs []*VLessConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -427,13 +434,13 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, localSocks5User, localSoc
 		})
 
 		// cfgs[0] is the direct VLESS config
-		outbounds = append(outbounds, buildVLessOutbound(cfgs[0], "direct"))
+		outbounds = append(outbounds, buildVLessOutbound(cfgs[0], "direct", muxConcurrency))
 	} else if len(cfgs) == 1 {
-		outbounds = []any{buildVLessOutbound(cfgs[0], "proxy")}
+		outbounds = []any{buildVLessOutbound(cfgs[0], "proxy", muxConcurrency)}
 	} else {
 		tags = []string{"local", "direct"}
 		for i, cfg := range cfgs {
-			outbounds = append(outbounds, buildVLessOutbound(cfg, tags[i]))
+			outbounds = append(outbounds, buildVLessOutbound(cfg, tags[i], muxConcurrency))
 		}
 	}
 
@@ -588,6 +595,7 @@ func main() {
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set")
 	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
+	muxConcurrency := flag.Int("mux", 0, "Enable Mux multiplexing with given concurrency (e.g. 8); 0 disables")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
 	statsSocket := flag.String("stats-socket", "", "Abstract Unix socket name for stats/status/check (Android/Linux only, e.g. vless-client)")
 	proxyUser := flag.String("proxy-user", "", "SOCKS5/HTTP proxy username (optional)")
@@ -730,7 +738,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *proxyUser, *proxyPass)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass)
 		if err != nil {
 			log.Fatal("Failed to build VLESS Xray configuration:", err)
 		}

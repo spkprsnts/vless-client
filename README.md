@@ -7,6 +7,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 ## Features
 
 - **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
+- **Mux multiplexing** to reduce DPI visibility of XHTTP connections
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
@@ -35,6 +36,15 @@ go build -o vless-client .
 
 ```bash
 ./vless-client -link "vless://UUID@host:port?security=reality&..." -listen 127.0.0.1:1080
+```
+
+With Mux enabled (recommended when DPI blocks XHTTP connections):
+
+```bash
+./vless-client \
+  -link  "vless://UUID@host:port?security=reality&..." \
+  -listen 127.0.0.1:1080 \
+  -mux   8
 ```
 
 With a local/CDN address override:
@@ -142,6 +152,7 @@ Connect through an upstream SOCKS5 that requires auth:
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
 | `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
+| `-mux` | `0` | Enable Mux multiplexing with given concurrency (e.g. `8`); `0` disables. Incompatible with `flow=xtls-rprx-vision` |
 | `-proxy-user` | | Username for the exposed SOCKS5/HTTP proxy |
 | `-proxy-pass` | | Password for the exposed SOCKS5/HTTP proxy |
 | `-debug` | `false` | Enable xray-core debug logging |
