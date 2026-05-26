@@ -362,7 +362,9 @@ func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[st
 		if extra := cfg.Params["extra"]; extra != "" {
 			var extraMap map[string]any
 			if err := json.Unmarshal([]byte(extra), &extraMap); err == nil {
-				xhttp["extra"] = extraMap
+				for k, v := range extraMap {
+					xhttp[k] = v
+				}
 			}
 		}
 		streamSettings["xhttpSettings"] = xhttp
@@ -605,6 +607,7 @@ func main() {
 	if *listen == "" {
 		log.Fatal("-listen is required")
 	}
+
 
 	var dnsList []string
 	for s := range strings.SplitSeq(*dnsServers, ",") {

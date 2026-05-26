@@ -8,6 +8,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 - **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
 - **Mux multiplexing** to reduce DPI visibility of XHTTP connections
+- **XHTTP anti-DPI obfuscation** — padding randomization, HTTP method override and session placement, configured via the VLESS link
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
@@ -38,13 +39,13 @@ go build -o vless-client .
 ./vless-client -link "vless://UUID@host:port?security=reality&..." -listen 127.0.0.1:1080
 ```
 
-With Mux enabled (recommended when DPI blocks XHTTP connections):
+With anti-DPI obfuscation for XHTTP (when RKN/DPI blocks the connection), pass the settings via the `extra` query parameter in the VLESS link as a URL-encoded JSON object — the server admin includes these when sharing the link:
 
 ```bash
+# extra={"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","uplinkHTTPMethod":"PUT","sessionPlacement":"query"}
 ./vless-client \
-  -link  "vless://UUID@host:port?security=reality&..." \
-  -listen 127.0.0.1:1080 \
-  -mux   8
+  -link   "vless://UUID@host:port?type=xhttp&security=reality&...&extra=%7B%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingMethod%22%3A%22tokenish%22%2C%22uplinkHTTPMethod%22%3A%22PUT%22%2C%22sessionPlacement%22%3A%22query%22%7D" \
+  -listen 127.0.0.1:1080
 ```
 
 With a local/CDN address override:
