@@ -1,17 +1,20 @@
 # vless-client
 
-A lightweight CLI proxy client built on [xray-core](https://github.com/xtls/xray-core). It parses a VLESS link or a WireGuard config and exposes a local SOCKS5 and/or HTTP proxy — no manual JSON config required.
+A lightweight CLI proxy client built on [xray-core](https://github.com/xtls/xray-core). It parses a VLESS/Trojan/Hysteria2 link or a WireGuard config and exposes a local SOCKS5 and/or HTTP proxy — no manual JSON config required.
 
 Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn).
 
 ## Features
 
 - **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
-- **Mux multiplexing** to reduce DPI visibility of XHTTP connections
-- **XHTTP anti-DPI obfuscation** — padding randomization, HTTP method override and session placement, configured via the VLESS link
+- **Trojan** proxy from a `trojan://` link — supports TLS, REALITY, and the same transports as VLESS
+- **Hysteria2** proxy from a `hysteria2://` (or `hy2://`) link — QUIC-based, tuned for lossy/high-latency networks
+- **Mux multiplexing** to reduce DPI visibility of XHTTP connections (VLESS/Trojan only)
+- **XHTTP anti-DPI obfuscation** — padding randomization, HTTP method override and session placement, configured via the link
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
+- Optional **YAML config file** (`-config`, default `config.yaml`) — CLI flags always override its values
 - SOCKS5 proxy (always on)
 - Optional HTTP proxy on a separate port
 - Optional username/password auth on exposed SOCKS5 and HTTP proxies
@@ -68,6 +71,28 @@ Connects through both a local/CDN address and the direct server address. Automat
   -direct-address server.example.com:443 \
   -listen         127.0.0.1:1080 \
   -metrics        127.0.0.1:8080
+```
+
+### Trojan
+
+```bash
+./vless-client -link "trojan://password@host:443?sni=host.example.com" -listen 127.0.0.1:1080
+```
+
+Same transport/TLS/REALITY query parameters as VLESS (`type`, `security`, `sni`, `fp`, `alpn`, `path`, `host`, `headers`, etc.), minus `flow`/`encryption` which are VLESS-only.
+
+### Hysteria2
+
+```bash
+./vless-client -link "hysteria2://auth@host:443?sni=host.example.com" -listen 127.0.0.1:1080
+```
+
+`hy2://` is accepted as an alias for `hysteria2://`. This xray-core build supports `auth`, `sni`, `alpn`, and `pinnedPeerCertSha256` for Hysteria2 — obfuscation (Salamander) and bandwidth/congestion tuning are not exposed. `-mux` doesn't apply to Hysteria2 (QUIC already multiplexes streams).
+
+Self-signed certs: since `allowInsecure` was removed upstream, pin the cert instead:
+
+```bash
+./vless-client -link "hysteria2://auth@host:443?pinnedPeerCertSha256=<hex-sha256>" -listen 127.0.0.1:1080
 ```
 
 ### VLESS — dual route with local SOCKS5 upstream
@@ -132,13 +157,26 @@ Connect through an upstream SOCKS5 that requires auth:
   -listen       127.0.0.1:1080
 ```
 
+## YAML config file
+
+Instead of (or alongside) flags, settings can come from a YAML file — see [config.example.yaml](config.example.yaml) for every available key. `config.yaml` in the working directory is loaded automatically if present; any flag passed explicitly on the command line overrides the corresponding value from the file.
+
+```bash
+cp config.example.yaml config.yaml
+# edit config.yaml, then:
+./vless-client
+# or point to a different file:
+./vless-client -config /path/to/other.yaml
+```
+
 ## Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `-listen` | *(required)* | SOCKS5 proxy listen address `ip:port` |
-| `-link` | | VLESS link (`vless://...`) |
-| `-local-address` | | Override destination `host:port` for VLESS (local/CDN route) |
+| `-link` | | Proxy link: `vless://`, `trojan://`, or `hysteria2://` (`hy2://`) |
+| `-config` | `config.yaml` | Path to YAML config file (loaded if present; CLI flags override its values) |
+| `-local-address` | | Override link destination `host:port` (local/CDN route) |
 | `-direct-address` | | Direct server `host:port`; enables load balancing between local and direct routes |
 | `-local-socks5` | | Local SOCKS5 proxy `[user:pass@]host:port`. Used as standalone upstream, or as the local route when `-link` and `-direct-address` are also set |
 | `-wg` | | Path to WireGuard `.conf` file |

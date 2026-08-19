@@ -17,12 +17,17 @@ stats_socket: ""                # abstract unix socket name for stats (Linux/And
 proxy_user: ""                  # SOCKS5/HTTP inbound auth (optional)
 proxy_pass: ""
 
-# --- Mode: VLESS ---
-link: "vless://uuid@host:443?security=tls&type=tcp&sni=example.com#My-Server"
-local_address: ""               # override VLESS destination host:port (local/CDN route)
+# --- Mode: proxy link (vless / trojan / hysteria2) ---
+# link: "vless://uuid@host:443?security=tls&type=tcp&sni=example.com&encryption=none#My-Server"
+# link: "trojan://password@host:443?security=tls&sni=example.com#My-Server"
+link: "hysteria2://auth@host:443?sni=example.com#My-Server"   # hy2:// also accepted
+local_address: ""               # override link destination host:port (local/CDN route)
 direct_address: ""              # direct server host:port; enables load balancing with local_address
 hc_interval: 30                 # load balancer health check interval, seconds
-mux: 0                          # mux concurrency; 0 disables
+mux: 0                          # mux concurrency; 0 disables. Not applicable to hysteria2
+
+# TLS cert pinning (all three protocols): use pinnedPeerCertSha256=<hex> in the link's
+# query string for self-signed certs. "allowInsecure"/"insecure" are no longer supported.
 
 # --- Mode: WireGuard (inline keys; takes priority over "wg" file below) ---
 wg_private_key: ""

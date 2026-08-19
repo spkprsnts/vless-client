@@ -35,11 +35,14 @@ import (
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	_ "github.com/xtls/xray-core/app/stats"
 	_ "github.com/xtls/xray-core/proxy/http"
+	_ "github.com/xtls/xray-core/proxy/hysteria"
 	_ "github.com/xtls/xray-core/proxy/socks"
+	_ "github.com/xtls/xray-core/proxy/trojan"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
 	_ "github.com/xtls/xray-core/proxy/wireguard"
 	_ "github.com/xtls/xray-core/transport/internet/grpc"
 	_ "github.com/xtls/xray-core/transport/internet/httpupgrade"
+	_ "github.com/xtls/xray-core/transport/internet/hysteria"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
 	_ "github.com/xtls/xray-core/transport/internet/splithttp"
 	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
@@ -51,11 +54,14 @@ import (
 	_ "github.com/xtls/xray-core/app/router"
 )
 
-type VLessConfig struct {
-	UUID    string
-	Address string
-	Port    int
-	Params  map[string]string
+// ProxyConfig holds a parsed proxy link. Protocol is "vless", "trojan", or "hysteria2".
+// Credential is the UUID (vless), password (trojan), or auth string (hysteria2).
+type ProxyConfig struct {
+	Protocol   string
+	Credential string
+	Address    string
+	Port       int
+	Params     map[string]string
 }
 
 // WireGuard config structs
@@ -340,18 +346,37 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 	return json.MarshalIndent(configJSON, "", "  ")
 }
 
-// Parse VLESS link
-func parseVLessLink(link string) (*VLessConfig, error) {
-	link = strings.TrimPrefix(link, "vless://")
+// parseProxyLink parses a vless://, trojan://, or hysteria2:// (hy2://) link. All four
+// schemes share the same shape: scheme://credential@host:port[/][?params][#name].
+func parseProxyLink(link string) (*ProxyConfig, error) {
+	var protocol string
+	switch {
+	case strings.HasPrefix(link, "vless://"):
+		protocol = "vless"
+		link = strings.TrimPrefix(link, "vless://")
+	case strings.HasPrefix(link, "trojan://"):
+		protocol = "trojan"
+		link = strings.TrimPrefix(link, "trojan://")
+	case strings.HasPrefix(link, "hysteria2://"):
+		protocol = "hysteria2"
+		link = strings.TrimPrefix(link, "hysteria2://")
+	case strings.HasPrefix(link, "hy2://"):
+		protocol = "hysteria2"
+		link = strings.TrimPrefix(link, "hy2://")
+	default:
+		return nil, fmt.Errorf("unsupported link scheme (expected vless://, trojan://, hysteria2://, or hy2://)")
+	}
+
 	parts := strings.SplitN(link, "@", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid vless link: missing '@'")
+		return nil, fmt.Errorf("invalid %s link: missing '@'", protocol)
 	}
-	uuid := parts[0]
+	credential := parts[0]
 	remaining := parts[1]
 
 	hostPortAndParams := strings.SplitN(remaining, "?", 2)
-	hostPort := hostPortAndParams[0]
+	// hysteria2 links commonly include a trailing "/" before the query string.
+	hostPort := strings.SplitN(hostPortAndParams[0], "/", 2)[0]
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		return nil, fmt.Errorf("invalid host:port: %v", err)
@@ -361,11 +386,12 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 		return nil, fmt.Errorf("invalid port: %v", err)
 	}
 
-	cfg := &VLessConfig{
-		UUID:    uuid,
-		Address: host,
-		Port:    port,
-		Params:  make(map[string]string),
+	cfg := &ProxyConfig{
+		Protocol:   protocol,
+		Credential: credential,
+		Address:    host,
+		Port:       port,
+		Params:     make(map[string]string),
 	}
 
 	if len(hostPortAndParams) > 1 {
@@ -384,8 +410,14 @@ func parseVLessLink(link string) (*VLessConfig, error) {
 	return cfg, nil
 }
 
-// buildVLessOutbound builds a single VLESS outbound map for use in Xray config.
-func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[string]any {
+// buildOutbound builds a single outbound map (vless or trojan) for use in Xray config.
+// Hysteria2 is handled separately by buildHysteriaOutbound since it uses a dedicated
+// QUIC-based transport instead of the ws/grpc/xhttp transports vless/trojan share.
+func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]any {
+	if cfg.Protocol == "hysteria2" {
+		return buildHysteriaOutbound(cfg, tag)
+	}
+
 	security := cfg.Params["security"]
 	if security == "" {
 		security = "tls"
@@ -412,8 +444,8 @@ func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[st
 		if alpn := cfg.Params["alpn"]; alpn != "" {
 			tlsSettings["alpn"] = strings.Split(alpn, ",")
 		}
-		if v := cfg.Params["allowInsecure"]; v == "1" || v == "true" {
-			tlsSettings["allowInsecure"] = true
+		if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
+			tlsSettings["pinnedPeerCertSha256"] = v
 		}
 		streamSettings["tlsSettings"] = tlsSettings
 	case "reality":
@@ -507,24 +539,39 @@ func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[st
 		streamSettings["xhttpSettings"] = xhttp
 	}
 
-	out := map[string]any{
-		"tag":      tag,
-		"protocol": "vless",
-		"settings": map[string]any{
+	var settings map[string]any
+	if cfg.Protocol == "trojan" {
+		settings = map[string]any{
+			"servers": []any{
+				map[string]any{
+					"address":  cfg.Address,
+					"port":     cfg.Port,
+					"password": cfg.Credential,
+				},
+			},
+		}
+	} else {
+		settings = map[string]any{
 			"vnext": []any{
 				map[string]any{
 					"address": cfg.Address,
 					"port":    cfg.Port,
 					"users": []any{
 						map[string]any{
-							"id":         cfg.UUID,
+							"id":         cfg.Credential,
 							"encryption": cfg.Params["encryption"],
 							"flow":       cfg.Params["flow"],
 						},
 					},
 				},
 			},
-		},
+		}
+	}
+
+	out := map[string]any{
+		"tag":            tag,
+		"protocol":       cfg.Protocol,
+		"settings":       settings,
 		"streamSettings": streamSettings,
 	}
 	if muxConcurrency > 0 {
@@ -536,8 +583,48 @@ func buildVLessOutbound(cfg *VLessConfig, tag string, muxConcurrency int) map[st
 	return out
 }
 
+// buildHysteriaOutbound builds a Hysteria2 outbound. Unlike vless/trojan it doesn't use the
+// ws/grpc/xhttp transports — Hysteria2 is a self-contained QUIC protocol (network "hysteria")
+// that always runs over TLS. This xray-core build supports auth + SNI/ALPN/cert pinning only;
+// obfuscation (Salamander) and bandwidth/congestion tuning are not exposed here.
+func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
+	sni := cfg.Params["sni"]
+	if sni == "" {
+		sni = cfg.Address
+	}
+
+	tlsSettings := map[string]any{
+		"serverName": sni,
+	}
+	if alpn := cfg.Params["alpn"]; alpn != "" {
+		tlsSettings["alpn"] = strings.Split(alpn, ",")
+	}
+	if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
+		tlsSettings["pinnedPeerCertSha256"] = v
+	}
+
+	return map[string]any{
+		"tag":      tag,
+		"protocol": "hysteria",
+		"settings": map[string]any{
+			"version": 2,
+			"address": cfg.Address,
+			"port":    cfg.Port,
+		},
+		"streamSettings": map[string]any{
+			"network":     "hysteria",
+			"security":    "tls",
+			"tlsSettings": tlsSettings,
+			"hysteriaSettings": map[string]any{
+				"version": 2,
+				"auth":    cfg.Credential,
+			},
+		},
+	}
+}
+
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*VLessConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass string) ([]byte, error) {
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -572,14 +659,14 @@ func buildXrayConfig(cfgs []*VLessConfig, localSocks5, localSocks5User, localSoc
 			},
 		})
 
-		// cfgs[0] is the direct VLESS config
-		outbounds = append(outbounds, buildVLessOutbound(cfgs[0], "direct", muxConcurrency))
+		// cfgs[0] is the direct proxy config
+		outbounds = append(outbounds, buildOutbound(cfgs[0], "direct", muxConcurrency))
 	} else if len(cfgs) == 1 {
-		outbounds = []any{buildVLessOutbound(cfgs[0], "proxy", muxConcurrency)}
+		outbounds = []any{buildOutbound(cfgs[0], "proxy", muxConcurrency)}
 	} else {
 		tags = []string{"local", "direct"}
 		for i, cfg := range cfgs {
-			outbounds = append(outbounds, buildVLessOutbound(cfg, tags[i], muxConcurrency))
+			outbounds = append(outbounds, buildOutbound(cfg, tags[i], muxConcurrency))
 		}
 	}
 
@@ -718,7 +805,7 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 }
 
 func main() {
-	link := flag.String("link", "", "VLESS link (vless://...)")
+	link := flag.String("link", "", "Proxy link: vless://, trojan://, or hysteria2:// (hy2://)")
 	wgConfigPath := flag.String("wg", "", "Path to WireGuard .conf file (overridden by wg-* flags)")
 	wgPrivateKey := flag.String("wg-private-key", "", "WireGuard private key")
 	wgPublicKey := flag.String("wg-public-key", "", "WireGuard peer public key")
@@ -730,9 +817,9 @@ func main() {
 	listen := flag.String("listen", "", "SOCKS5 proxy listen address ip:port (required)")
 	httpSep := flag.String("http", "", "HTTP proxy listen address ip:port (optional)")
 	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated DNS servers")
-	localAddress := flag.String("local-address", "", "Override VLESS destination to this host:port (local/CDN route)")
+	localAddress := flag.String("local-address", "", "Override proxy destination to this host:port (local/CDN route)")
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
-	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of local VLESS if -link and -direct-address are set")
+	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of the local route if -link and -direct-address are set")
 	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
 	muxConcurrency := flag.Int("mux", 0, "Enable Mux multiplexing with given concurrency (e.g. 8); 0 disables")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
@@ -824,12 +911,18 @@ func main() {
 			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
 		}
 	} else if *link != "" {
-		// Mode 3: VLESS from link
-		cfg, err := parseVLessLink(*link)
+		// Mode 3: vless/trojan/hysteria2 from link
+		cfg, err := parseProxyLink(*link)
 		if err != nil {
-			log.Fatal("Failed to parse VLESS link:", err)
+			log.Fatal("Failed to parse proxy link:", err)
 		}
-		var cfgs []*VLessConfig
+		if cfg.Protocol == "hysteria2" && *muxConcurrency > 0 {
+			log.Println("warning: -mux is not applicable to hysteria2 and will be ignored")
+		}
+		if cfg.Params["allowInsecure"] != "" || cfg.Params["insecure"] != "" {
+			log.Println(`warning: "allowInsecure"/"insecure" is no longer supported by this xray-core build and is ignored; use "pinnedPeerCertSha256" instead`)
+		}
+		var cfgs []*ProxyConfig
 
 		if parsedLocalSocks5 != "" {
 			if *directAddress == "" {
@@ -852,8 +945,8 @@ func main() {
 			}
 			cfg.Address = host
 			cfg.Port = port
-			cfgs = []*VLessConfig{cfg}
-			log.Printf("Using load balancer: SOCKS5 local route %s, VLESS direct route %s:%d", parsedLocalSocks5, host, port)
+			cfgs = []*ProxyConfig{cfg}
+			log.Printf("Using load balancer: SOCKS5 local route %s, %s direct route %s:%d", parsedLocalSocks5, cfg.Protocol, host, port)
 		} else {
 			if *localAddress != "" {
 				host, portStr, err := net.SplitHostPort(*localAddress)
@@ -868,7 +961,7 @@ func main() {
 				cfg.Port = port
 			}
 
-			cfgs = []*VLessConfig{cfg}
+			cfgs = []*ProxyConfig{cfg}
 
 			if *directAddress != "" {
 				host, portStr, err := net.SplitHostPort(*directAddress)
@@ -879,22 +972,22 @@ func main() {
 				if err != nil {
 					log.Fatalf("Invalid port in -direct-address %q: %v", *directAddress, err)
 				}
-				cfg2, err := parseVLessLink(*link)
+				cfg2, err := parseProxyLink(*link)
 				if err != nil {
-					log.Fatal("Failed to parse VLESS link for direct config:", err)
+					log.Fatal("Failed to parse proxy link for direct config:", err)
 				}
 				cfg2.Address = host
 				cfg2.Port = port
 				cfgs = append(cfgs, cfg2)
-				log.Printf("Using VLESS with load balancer: local route %s:%d, direct route %s:%d", cfg.Address, cfg.Port, host, port)
+				log.Printf("Using %s with load balancer: local route %s:%d, direct route %s:%d", cfg.Protocol, cfg.Address, cfg.Port, host, port)
 			} else {
-				log.Println("Using VLESS config from link")
+				log.Printf("Using %s config from link", cfg.Protocol)
 			}
 		}
 
 		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass)
 		if err != nil {
-			log.Fatal("Failed to build VLESS Xray configuration:", err)
+			log.Fatal("Failed to build Xray configuration:", err)
 		}
 	} else if parsedLocalSocks5 != "" {
 		// Mode 4: Standalone SOCKS5 proxy
@@ -908,7 +1001,7 @@ func main() {
 			log.Fatal("Failed to build SOCKS5 Xray configuration:", err)
 		}
 	} else {
-		log.Fatal("No configuration provided. Use -link (for VLESS), -wg (for WireGuard file), wg-* flags, or -local-socks5.")
+		log.Fatal("No configuration provided. Use -link (vless/trojan/hysteria2), -wg (for WireGuard file), wg-* flags, or -local-socks5.")
 	}
 
 	// Load config using serial.LoadJSONConfig (requires io.Reader)
