@@ -1,0 +1,40 @@
+# Example config for vless-client.
+#
+# Copy this file to config.yaml (loaded automatically) or point to it explicitly
+# with -config path/to/file.yaml. Any flag passed on the command line overrides
+# the corresponding value here.
+#
+# Only fill in the section for the mode you actually use; leave the rest blank
+# or delete it. Mode priority (same as flags): WireGuard flags > wg file >
+# VLESS link > standalone local_socks5.
+
+# --- Common (used in every mode) ---
+listen: "127.0.0.1:1080"       # SOCKS5 listen address, required
+http: ""                        # optional HTTP proxy listen address
+dns: "8.8.8.8,1.1.1.1"          # comma-separated DNS servers
+debug: false                    # verbose xray-core logging
+stats_socket: ""                # abstract unix socket name for stats (Linux/Android)
+proxy_user: ""                  # SOCKS5/HTTP inbound auth (optional)
+proxy_pass: ""
+
+# --- Mode: VLESS ---
+link: "vless://uuid@host:443?security=tls&type=tcp&sni=example.com#My-Server"
+local_address: ""               # override VLESS destination host:port (local/CDN route)
+direct_address: ""              # direct server host:port; enables load balancing with local_address
+hc_interval: 30                 # load balancer health check interval, seconds
+mux: 0                          # mux concurrency; 0 disables
+
+# --- Mode: WireGuard (inline keys; takes priority over "wg" file below) ---
+wg_private_key: ""
+wg_public_key: ""
+wg_preshared_key: ""
+wg_endpoint: ""                 # host:port
+wg_address: ""                  # comma-separated, e.g. 10.0.0.2/32
+wg_mtu: 0
+wg_keepalive: 0
+
+# --- Mode: WireGuard (.conf file instead of inline keys above) ---
+wg: ""                          # path to a WireGuard .conf file
+
+# --- Mode: standalone upstream SOCKS5 (no VLESS/WireGuard) ---
+local_socks5: ""                # [user:pass@]host:port

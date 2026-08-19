@@ -2,7 +2,10 @@ module vless-client
 
 go 1.26.2
 
-require github.com/xtls/xray-core v1.260327.1-0.20260523135001-ab69985fccb3
+require (
+	github.com/xtls/xray-core v1.260327.1-0.20260523135001-ab69985fccb3
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/andybalholm/brotli v1.2.2 // indirect

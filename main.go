@@ -17,6 +17,8 @@ import (
 	"context"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/extension"
@@ -68,6 +70,92 @@ type WireGuardPeerConfig struct {
 	PresharedKey string
 	Endpoint     string
 	KeepAlive    int
+}
+
+// FileConfig mirrors the CLI flags for use in an optional YAML config file.
+// Any flag explicitly passed on the command line overrides the corresponding value here.
+type FileConfig struct {
+	Link           string `yaml:"link"`
+	WG             string `yaml:"wg"`
+	WGPrivateKey   string `yaml:"wg_private_key"`
+	WGPublicKey    string `yaml:"wg_public_key"`
+	WGPresharedKey string `yaml:"wg_preshared_key"`
+	WGEndpoint     string `yaml:"wg_endpoint"`
+	WGAddress      string `yaml:"wg_address"`
+	WGMTU          *int   `yaml:"wg_mtu"`
+	WGKeepAlive    *int   `yaml:"wg_keepalive"`
+	Listen         string `yaml:"listen"`
+	HTTP           string `yaml:"http"`
+	DNS            string `yaml:"dns"`
+	LocalAddress   string `yaml:"local_address"`
+	DirectAddress  string `yaml:"direct_address"`
+	LocalSocks5    string `yaml:"local_socks5"`
+	HCInterval     *int   `yaml:"hc_interval"`
+	Mux            *int   `yaml:"mux"`
+	Debug          *bool  `yaml:"debug"`
+	StatsSocket    string `yaml:"stats_socket"`
+	ProxyUser      string `yaml:"proxy_user"`
+	ProxyPass      string `yaml:"proxy_pass"`
+}
+
+// loadFileConfig reads and parses the YAML config at path. If the file is missing and
+// explicit is false (i.e. the caller didn't ask for it via -config), that's not an error —
+// it just means no config file is in use.
+func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && !explicit {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var cfg FileConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return &cfg, nil
+}
+
+// applyFileConfig fills flag values from the file config, skipping any flag the user
+// explicitly set on the command line (those always win).
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug *bool) {
+	str := func(name string, dst *string, src string) {
+		if !setFlags[name] && src != "" {
+			*dst = src
+		}
+	}
+	intp := func(name string, dst *int, src *int) {
+		if !setFlags[name] && src != nil {
+			*dst = *src
+		}
+	}
+	boolp := func(name string, dst *bool, src *bool) {
+		if !setFlags[name] && src != nil {
+			*dst = *src
+		}
+	}
+
+	str("link", link, fc.Link)
+	str("wg", wgConfigPath, fc.WG)
+	str("wg-private-key", wgPrivateKey, fc.WGPrivateKey)
+	str("wg-public-key", wgPublicKey, fc.WGPublicKey)
+	str("wg-preshared-key", wgPresharedKey, fc.WGPresharedKey)
+	str("wg-endpoint", wgEndpoint, fc.WGEndpoint)
+	str("wg-address", wgAddress, fc.WGAddress)
+	intp("wg-mtu", wgMTU, fc.WGMTU)
+	intp("wg-keepalive", wgKeepAlive, fc.WGKeepAlive)
+	str("listen", listen, fc.Listen)
+	str("http", httpSep, fc.HTTP)
+	str("dns", dnsServers, fc.DNS)
+	str("local-address", localAddress, fc.LocalAddress)
+	str("direct-address", directAddress, fc.DirectAddress)
+	str("local-socks5", localSocks5, fc.LocalSocks5)
+	intp("hc-interval", hcInterval, fc.HCInterval)
+	intp("mux", muxConcurrency, fc.Mux)
+	boolp("debug", debug, fc.Debug)
+	str("stats-socket", statsSocket, fc.StatsSocket)
+	str("proxy-user", proxyUser, fc.ProxyUser)
+	str("proxy-pass", proxyPass, fc.ProxyPass)
 }
 
 // Simple INI parser for WireGuard config
@@ -651,12 +739,27 @@ func main() {
 	statsSocket := flag.String("stats-socket", "", "Abstract Unix socket name for stats/status/check (Android/Linux only, e.g. vless-client)")
 	proxyUser := flag.String("proxy-user", "", "SOCKS5/HTTP proxy username (optional)")
 	proxyPass := flag.String("proxy-pass", "", "SOCKS5/HTTP proxy password (optional)")
+	configPath := flag.String("config", "config.yaml", "Path to YAML config file (loaded if present; explicit CLI flags override its values)")
 	flag.Parse()
+
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	fileCfg, err := loadFileConfig(*configPath, setFlags["config"])
+	if err != nil {
+		log.Fatalf("Failed to load config file %s: %v", *configPath, err)
+	}
+	if fileCfg != nil {
+		applyFileConfig(fileCfg, setFlags,
+			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
+			listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
+			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug)
+		log.Printf("Loaded config file %s", *configPath)
+	}
 
 	if *listen == "" {
 		log.Fatal("-listen is required")
 	}
-
 
 	var dnsList []string
 	for s := range strings.SplitSeq(*dnsServers, ",") {
@@ -679,7 +782,6 @@ func main() {
 	}
 
 	var jsonConfig []byte
-	var err error
 
 	// Determine mode based on flags (flags > file > link)
 	useWgFlags := *wgPrivateKey != "" && *wgPublicKey != "" && *wgEndpoint != ""
