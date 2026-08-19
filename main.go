@@ -922,6 +922,13 @@ func main() {
 		if cfg.Params["allowInsecure"] != "" || cfg.Params["insecure"] != "" {
 			log.Println(`warning: "allowInsecure"/"insecure" is no longer supported by this xray-core build and is ignored; use "pinnedPeerCertSha256" instead`)
 		}
+		// Lock in the TLS SNI from the link's own address before -local-address/-direct-address
+		// can override cfg.Address for routing. Otherwise, a link with no explicit sni= param
+		// would end up sending the tunnel/CDN address as SNI instead of the real server's,
+		// breaking the TLS handshake against the real server's certificate.
+		if cfg.Params["sni"] == "" {
+			cfg.Params["sni"] = cfg.Address
+		}
 		var cfgs []*ProxyConfig
 
 		if parsedLocalSocks5 != "" {
@@ -975,6 +982,9 @@ func main() {
 				cfg2, err := parseProxyLink(*link)
 				if err != nil {
 					log.Fatal("Failed to parse proxy link for direct config:", err)
+				}
+				if cfg2.Params["sni"] == "" {
+					cfg2.Params["sni"] = cfg2.Address
 				}
 				cfg2.Address = host
 				cfg2.Port = port
