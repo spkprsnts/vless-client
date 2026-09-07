@@ -610,8 +610,8 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 
 // buildHysteriaOutbound builds a Hysteria2 outbound. Unlike vless/trojan it doesn't use the
 // ws/grpc/xhttp transports — Hysteria2 is a self-contained QUIC protocol (network "hysteria")
-// that always runs over TLS. This xray-core build supports auth + SNI/ALPN/cert pinning only;
-// obfuscation (Salamander) and bandwidth/congestion tuning are not exposed here.
+// that always runs over TLS. Supports auth, SNI/ALPN/cert pinning, Salamander obfuscation
+// (obfs=salamander&obfs-password=...), and congestion/bandwidth tuning (up=/down=/congestion=).
 func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 	sni := cfg.Params["sni"]
 	if sni == "" {
@@ -628,6 +628,19 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 		tlsSettings["pinnedPeerCertSha256"] = v
 	}
 
+	streamSettings := map[string]any{
+		"network":     "hysteria",
+		"security":    "tls",
+		"tlsSettings": tlsSettings,
+		"hysteriaSettings": map[string]any{
+			"version": 2,
+			"auth":    cfg.Credential,
+		},
+	}
+	if fm := buildHysteriaFinalMask(cfg.Params); fm != nil {
+		streamSettings["finalmask"] = fm
+	}
+
 	return map[string]any{
 		"tag":      tag,
 		"protocol": "hysteria",
@@ -636,19 +649,63 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 			"address": cfg.Address,
 			"port":    cfg.Port,
 		},
-		"streamSettings": map[string]any{
-			"network":     "hysteria",
-			"security":    "tls",
-			"tlsSettings": tlsSettings,
-			"hysteriaSettings": map[string]any{
-				"version": 2,
-				"auth":    cfg.Credential,
-			},
-		},
+		"streamSettings": streamSettings,
 	}
 }
 
-// Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
+// buildHysteriaFinalMask builds the optional Hysteria2 "finalmask" stream-settings block from
+// link params: obfs/obfs-password (Salamander UDP obfuscation) and up/down/congestion (QUIC
+// congestion control). Returns nil if none of these params are set, leaving Xray's defaults.
+func buildHysteriaFinalMask(params map[string]string) map[string]any {
+	var fm map[string]any
+
+	if strings.EqualFold(params["obfs"], "salamander") {
+		fm = map[string]any{
+			"udp": []any{
+				map[string]any{
+					"type":     "salamander",
+					"settings": map[string]any{"password": params["obfs-password"]},
+				},
+			},
+		}
+	}
+
+	up, down, congestion := params["up"], params["down"], params["congestion"]
+	if up != "" || down != "" || congestion != "" {
+		quicParams := map[string]any{}
+		if congestion != "" {
+			quicParams["congestion"] = strings.ToLower(congestion)
+		} else {
+			// Hysteria2's whole design point is client-declared bandwidth caps driving
+			// Brutal congestion control, so default to "brutal" whenever up/down is set.
+			quicParams["congestion"] = "brutal"
+		}
+		if up != "" {
+			quicParams["brutalUp"] = normalizeBandwidth(up)
+		}
+		if down != "" {
+			quicParams["brutalDown"] = normalizeBandwidth(down)
+		}
+		if fm == nil {
+			fm = map[string]any{}
+		}
+		fm["quicParams"] = quicParams
+	}
+
+	return fm
+}
+
+// normalizeBandwidth accepts a bare number (interpreted as Mbps, matching the convention used
+// by hysteria2:// up=/down= params in the wild) or a value with an explicit unit (e.g. "500kbps")
+// and returns a string in the form Xray's Bandwidth type parses.
+func normalizeBandwidth(v string) string {
+	v = strings.TrimSpace(v)
+	if _, err := strconv.ParseFloat(v, 64); err == nil {
+		return v + "mbps"
+	}
+	return v
+}
+
 // parseRouteSpec splits a comma-separated routing match spec (e.g. "geosite:cn,geoip:cn,geoip:private")
 // into the "domain" and "ip" arrays used by an Xray field routing rule. "geoip:" entries and literal
 // IPs/CIDRs go to ip[]; everything else (geosite:, domain:, full:, regexp:, keyword:, or a bare domain)
@@ -706,6 +763,7 @@ func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []a
 	return outbounds, rules, useIPMatch
 }
 
+// Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
 func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"

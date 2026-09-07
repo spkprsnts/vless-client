@@ -8,7 +8,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 - **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
 - **Trojan** proxy from a `trojan://` link — supports TLS, REALITY, and the same transports as VLESS
-- **Hysteria2** proxy from a `hysteria2://` (or `hy2://`) link — QUIC-based, tuned for lossy/high-latency networks
+- **Hysteria2** proxy from a `hysteria2://` (or `hy2://`) link — QUIC-based, tuned for lossy/high-latency networks; supports Salamander obfuscation and Brutal congestion/bandwidth tuning
 - **Mux multiplexing** to reduce DPI visibility of XHTTP connections (VLESS/Trojan only)
 - **XHTTP anti-DPI obfuscation** — padding randomization, HTTP method override and session placement, configured via the link
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
@@ -88,13 +88,23 @@ Same transport/TLS/REALITY query parameters as VLESS (`type`, `security`, `sni`,
 ./vless-client -link "hysteria2://auth@host:443?sni=host.example.com" -listen 127.0.0.1:1080
 ```
 
-`hy2://` is accepted as an alias for `hysteria2://`. This xray-core build supports `auth`, `sni`, `alpn`, and `pinnedPeerCertSha256` for Hysteria2 — obfuscation (Salamander) and bandwidth/congestion tuning are not exposed. `-mux` doesn't apply to Hysteria2 (QUIC already multiplexes streams).
+`hy2://` is accepted as an alias for `hysteria2://`. Supports `auth`, `sni`, `alpn`, `pinnedPeerCertSha256`, Salamander obfuscation, and congestion/bandwidth tuning. `-mux` doesn't apply to Hysteria2 (QUIC already multiplexes streams).
 
 Self-signed certs: since `allowInsecure` was removed upstream, pin the cert instead:
 
 ```bash
 ./vless-client -link "hysteria2://auth@host:443?pinnedPeerCertSha256=<hex-sha256>" -listen 127.0.0.1:1080
 ```
+
+Salamander obfuscation (hides the QUIC handshake from DPI) and Brutal congestion control (bandwidth caps you declare so the client doesn't back off on packet loss the way TCP-style congestion control would):
+
+```bash
+./vless-client -link "hysteria2://auth@host:443?obfs=salamander&obfs-password=<pwd>&up=100&down=100" -listen 127.0.0.1:1080
+```
+
+- `obfs=salamander` + `obfs-password=<pwd>` — must match the server's configuration
+- `up=`/`down=` — your own uplink/downlink caps in Mbps (a bare number), or a value with an explicit unit (e.g. `up=500kbps`); setting either enables Brutal congestion control by default
+- `congestion=` — override the congestion algorithm explicitly (`brutal`, `bbr`, `reno`, or `force-brutal`, which requires `up`); defaults to `brutal` when `up`/`down` is set, otherwise left to Xray's default
 
 ### VLESS — dual route with local SOCKS5 upstream
 
