@@ -435,13 +435,25 @@ func parseProxyLink(link string) (*ProxyConfig, error) {
 	return cfg, nil
 }
 
+// paramAlias reads params[name], falling back to params[alias] if the primary key is absent.
+// Used for link params where this client's naming (mirroring Xray's own JSON config field
+// names) differs from the short names some panels — e.g. 3x-ui uses "ech"/"pcs" — put in
+// their generated share links, so links copy-pasted from either source work unmodified.
+func paramAlias(params map[string]string, name, alias string) string {
+	if v := params[name]; v != "" {
+		return v
+	}
+	return params[alias]
+}
+
 // applyECHParams adds Encrypted Client Hello settings to a tlsSettings map from the
-// echConfigList/echForceQuery link params. echConfigList is either a raw base64-encoded
-// ECHConfigList fetched out of band, or a DNS-query spec ("dnsserver" or "domain+dnsserver",
-// e.g. "udp://1.1.1.1" or "cloudflare-ech.com+https://1.1.1.1/dns-query") that Xray resolves
-// itself at connect time, querying the tlsSettings serverName if no domain is given.
+// echConfigList/echForceQuery link params ("ech" is accepted as an alias for echConfigList,
+// matching 3x-ui's share links). echConfigList is either a raw base64-encoded ECHConfigList
+// fetched out of band, or a DNS-query spec ("dnsserver" or "domain+dnsserver", e.g.
+// "udp://1.1.1.1" or "cloudflare-ech.com+https://1.1.1.1/dns-query") that Xray resolves itself
+// at connect time, querying the tlsSettings serverName if no domain is given.
 func applyECHParams(tlsSettings map[string]any, params map[string]string) {
-	v := params["echConfigList"]
+	v := paramAlias(params, "echConfigList", "ech")
 	if v == "" {
 		return
 	}
@@ -485,7 +497,7 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 		if alpn := cfg.Params["alpn"]; alpn != "" {
 			tlsSettings["alpn"] = strings.Split(alpn, ",")
 		}
-		if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
+		if v := paramAlias(cfg.Params, "pinnedPeerCertSha256", "pcs"); v != "" {
 			tlsSettings["pinnedPeerCertSha256"] = v
 		}
 		applyECHParams(tlsSettings, cfg.Params)
@@ -641,7 +653,7 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 	if alpn := cfg.Params["alpn"]; alpn != "" {
 		tlsSettings["alpn"] = strings.Split(alpn, ",")
 	}
-	if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
+	if v := paramAlias(cfg.Params, "pinnedPeerCertSha256", "pcs"); v != "" {
 		tlsSettings["pinnedPeerCertSha256"] = v
 	}
 	applyECHParams(tlsSettings, cfg.Params)
