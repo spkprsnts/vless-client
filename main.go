@@ -435,6 +435,22 @@ func parseProxyLink(link string) (*ProxyConfig, error) {
 	return cfg, nil
 }
 
+// applyECHParams adds Encrypted Client Hello settings to a tlsSettings map from the
+// echConfigList/echForceQuery link params. echConfigList is either a raw base64-encoded
+// ECHConfigList fetched out of band, or a DNS-query spec ("dnsserver" or "domain+dnsserver",
+// e.g. "udp://1.1.1.1" or "cloudflare-ech.com+https://1.1.1.1/dns-query") that Xray resolves
+// itself at connect time, querying the tlsSettings serverName if no domain is given.
+func applyECHParams(tlsSettings map[string]any, params map[string]string) {
+	v := params["echConfigList"]
+	if v == "" {
+		return
+	}
+	tlsSettings["echConfigList"] = v
+	if fq := params["echForceQuery"]; fq != "" {
+		tlsSettings["echForceQuery"] = fq
+	}
+}
+
 // buildOutbound builds a single outbound map (vless or trojan) for use in Xray config.
 // Hysteria2 is handled separately by buildHysteriaOutbound since it uses a dedicated
 // QUIC-based transport instead of the ws/grpc/xhttp transports vless/trojan share.
@@ -472,6 +488,7 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 		if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
 			tlsSettings["pinnedPeerCertSha256"] = v
 		}
+		applyECHParams(tlsSettings, cfg.Params)
 		streamSettings["tlsSettings"] = tlsSettings
 	case "reality":
 		streamSettings["security"] = "reality"
@@ -627,6 +644,7 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 	if v := cfg.Params["pinnedPeerCertSha256"]; v != "" {
 		tlsSettings["pinnedPeerCertSha256"] = v
 	}
+	applyECHParams(tlsSettings, cfg.Params)
 
 	streamSettings := map[string]any{
 		"network":     "hysteria",

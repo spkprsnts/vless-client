@@ -15,6 +15,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
 - **Geosite/geoip routing** — bypass or block traffic by domain/IP category before it reaches the tunnel
+- **ECH (Encrypted Client Hello)** for VLESS/Trojan/Hysteria2 over TLS — hides the real SNI from DPI, with automatic DNS-based config fetch
 - Optional **YAML config file** (`-config`, default `config.yaml`) — CLI flags always override its values
 - SOCKS5 proxy (always on)
 - Optional HTTP proxy on a separate port
@@ -60,6 +61,24 @@ With a local/CDN address override:
   -local-address 192.168.1.1:443 \
   -listen        127.0.0.1:1080
 ```
+
+### ECH (Encrypted Client Hello)
+
+Hides the real SNI inside the TLS handshake from on-path DPI. Works with VLESS, Trojan, and Hysteria2 whenever `security=tls` (not applicable to REALITY, which already hides the real destination a different way). Pass it via `echConfigList` in the link's query string:
+
+```bash
+# Raw ECHConfigList, base64-encoded (obtained out of band, e.g. from the server admin or `dig +short TYPE65 host.example.com`)
+./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com&echConfigList=<base64>" -listen 127.0.0.1:1080
+
+# Or let Xray fetch it itself via DNS HTTPS record lookup at connect time:
+./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com&echConfigList=udp://1.1.1.1" -listen 127.0.0.1:1080
+```
+
+`echConfigList` accepts either:
+- a raw base64-encoded ECHConfigList, or
+- a DNS-query spec resolved automatically: `<dnsserver>` (queries the link's `sni` for an HTTPS/ECH record) or `<domain>+<dnsserver>` to query a different domain than `sni` — `dnsserver` can be `udp://ip[:port]`, `https://.../dns-query` (DoH), or `h2c://...`
+
+Optional `echForceQuery=none|half|full` controls how aggressively the DNS-fetched config is re-queried instead of reused from cache (default: cached, refreshed in the background).
 
 ### VLESS — dual route with load balancer
 
