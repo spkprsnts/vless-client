@@ -14,6 +14,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
+- **Geosite/geoip routing** — bypass or block traffic by domain/IP category before it reaches the tunnel
 - Optional **YAML config file** (`-config`, default `config.yaml`) — CLI flags always override its values
 - SOCKS5 proxy (always on)
 - Optional HTTP proxy on a separate port
@@ -169,6 +170,35 @@ cp config.example.yaml config.yaml
 ./vless-client -config /path/to/other.yaml
 ```
 
+## Geosite/geoip routing
+
+`-route-direct` and `-route-block` (or `route_direct`/`route_block` in the YAML config) let you bypass or
+drop traffic before it reaches the tunnel, using the same rule syntax as Xray's `routing.rules`. This works
+in every mode (VLESS/Trojan/Hysteria2, WireGuard, and standalone SOCKS5).
+
+Each is a comma-separated list of entries:
+
+- `geosite:name` — a domain category from `geosite.dat` (e.g. `geosite:cn`, `geosite:category-ads-all`)
+- `geoip:name` — an IP range category from `geoip.dat` (e.g. `geoip:cn`, `geoip:private`)
+- a plain domain (e.g. `example.com`) or a CIDR (e.g. `10.0.0.0/8`)
+
+`geosite:`/`geoip:` entries need the actual data files, downloaded separately (they're not bundled) —
+e.g. from [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases) or the
+official [v2fly](https://github.com/v2fly) builds — placed in a directory pointed to by `-assets-path`
+(or the `XRAY_LOCATION_ASSET` environment variable, which `-assets-path` sets for you). Plain domains/CIDRs
+don't need any data file.
+
+Block rules are checked before direct rules, so blocking a specific domain still works even if it also
+falls under a category you're routing directly. When any `geoip:`/CIDR entry is used, `domainStrategy`
+automatically switches to `IPIfNonMatch` so domains get resolved for IP matching; otherwise it stays `AsIs`.
+
+```bash
+./vless-client -link "vless://..." -listen 127.0.0.1:1080 \
+  -assets-path /etc/xray/assets \
+  -route-direct "geosite:cn,geoip:cn,geoip:private" \
+  -route-block "geosite:category-ads-all"
+```
+
 ## Flags
 
 | Flag | Default | Description |
@@ -194,6 +224,9 @@ cp config.example.yaml config.yaml
 | `-mux` | `0` | Enable Mux multiplexing with given concurrency (e.g. `8`); `0` disables. Incompatible with `flow=xtls-rprx-vision` |
 | `-proxy-user` | | Username for the exposed SOCKS5/HTTP proxy |
 | `-proxy-pass` | | Password for the exposed SOCKS5/HTTP proxy |
+| `-assets-path` | | Directory containing `geoip.dat`/`geosite.dat` (sets `XRAY_LOCATION_ASSET`); required for `geosite:`/`geoip:` entries below |
+| `-route-direct` | | Comma-separated match entries (`geosite:name`, `geoip:name`, plain domain, or CIDR) routed directly, bypassing the tunnel |
+| `-route-block` | | Comma-separated match entries (same syntax) that are dropped entirely |
 | `-debug` | `false` | Enable xray-core debug logging |
 
 > **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.

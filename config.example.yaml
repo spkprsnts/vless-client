@@ -43,3 +43,12 @@ wg: ""                          # path to a WireGuard .conf file
 
 # --- Mode: standalone upstream SOCKS5 (no VLESS/WireGuard) ---
 local_socks5: ""                # [user:pass@]host:port
+
+# --- Routing (applies to every mode) ---
+# Entries are comma-separated; each is "geosite:name", "geoip:name", a plain domain, or a CIDR.
+# geosite:/geoip: entries require geoip.dat/geosite.dat in assets_path (or XRAY_LOCATION_ASSET) —
+# e.g. from https://github.com/Loyalsoldier/v2ray-rules-dat/releases (or the official v2fly builds).
+# Block rules win over direct rules when both match the same entry.
+assets_path: ""                 # directory containing geoip.dat/geosite.dat
+route_direct: ""                # e.g. "geosite:cn,geoip:cn,geoip:private" — bypass the tunnel
+route_block: ""                 # e.g. "geosite:category-ads-all" — dropped entirely

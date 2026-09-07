@@ -34,6 +34,8 @@ import (
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	_ "github.com/xtls/xray-core/app/stats"
+	_ "github.com/xtls/xray-core/proxy/blackhole"
+	_ "github.com/xtls/xray-core/proxy/freedom"
 	_ "github.com/xtls/xray-core/proxy/http"
 	_ "github.com/xtls/xray-core/proxy/hysteria"
 	_ "github.com/xtls/xray-core/proxy/socks"
@@ -102,6 +104,9 @@ type FileConfig struct {
 	StatsSocket    string `yaml:"stats_socket"`
 	ProxyUser      string `yaml:"proxy_user"`
 	ProxyPass      string `yaml:"proxy_pass"`
+	AssetsPath     string `yaml:"assets_path"`
+	RouteDirect    string `yaml:"route_direct"`
+	RouteBlock     string `yaml:"route_block"`
 }
 
 // loadFileConfig reads and parses the YAML config at path. If the file is missing and
@@ -124,7 +129,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -162,6 +167,9 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("stats-socket", statsSocket, fc.StatsSocket)
 	str("proxy-user", proxyUser, fc.ProxyUser)
 	str("proxy-pass", proxyPass, fc.ProxyPass)
+	str("assets-path", assetsPath, fc.AssetsPath)
+	str("route-direct", routeDirect, fc.RouteDirect)
+	str("route-block", routeBlock, fc.RouteBlock)
 }
 
 // Simple INI parser for WireGuard config
@@ -290,7 +298,7 @@ func buildInbounds(listenAddr, httpAddr, authUser, authPass string) []any {
 }
 
 // Generate Xray configuration for WireGuard
-func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass string) ([]byte, error) {
+func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass, routeDirect, routeBlock string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -321,6 +329,25 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 		wgSettings["mtu"] = iface.MTU
 	}
 
+	outbounds := []any{
+		map[string]any{
+			"tag":      "proxy",
+			"protocol": "wireguard",
+			"settings": wgSettings,
+		},
+	}
+	geoOutbounds, geoRules, useIPMatch := buildGeoRouting(routeDirect, routeBlock)
+	outbounds = append(outbounds, geoOutbounds...)
+	domainStrategy := "AsIs"
+	if useIPMatch {
+		domainStrategy = "IPIfNonMatch"
+	}
+	routingRules := append(geoRules, map[string]any{
+		"type":        "field",
+		"network":     "tcp,udp",
+		"outboundTag": "proxy",
+	})
+
 	// Full configuration
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
@@ -334,13 +361,11 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 				"statsOutboundDownlink": true,
 			},
 		},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{
-				"tag":      "proxy",
-				"protocol": "wireguard",
-				"settings": wgSettings,
-			},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
+		"routing": map[string]any{
+			"domainStrategy": domainStrategy,
+			"rules":          routingRules,
 		},
 	}
 	return json.MarshalIndent(configJSON, "", "  ")
@@ -624,7 +649,64 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass string) ([]byte, error) {
+// parseRouteSpec splits a comma-separated routing match spec (e.g. "geosite:cn,geoip:cn,geoip:private")
+// into the "domain" and "ip" arrays used by an Xray field routing rule. "geoip:" entries and literal
+// IPs/CIDRs go to ip[]; everything else (geosite:, domain:, full:, regexp:, keyword:, or a bare domain)
+// goes to domain[]. Requires geoip.dat/geosite.dat to be reachable via -assets-path (XRAY_LOCATION_ASSET).
+func parseRouteSpec(spec string) (domains []string, ips []string) {
+	for entry := range strings.SplitSeq(spec, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.HasPrefix(entry, "geoip:") {
+			ips = append(ips, entry)
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err == nil {
+			ips = append(ips, entry)
+			continue
+		}
+		if net.ParseIP(entry) != nil {
+			ips = append(ips, entry)
+			continue
+		}
+		domains = append(domains, entry)
+	}
+	return domains, ips
+}
+
+// buildGeoRouting builds the optional freedom ("direct-out") and blackhole ("block-out") outbounds
+// plus their routing rules for -route-direct/-route-block. Block rules are returned before direct
+// rules so a blocked entry wins even when it also falls under a broader directly-routed category.
+// useIPMatch reports whether any "ip" rule was produced, so the caller can switch domainStrategy
+// to "IPIfNonMatch" (domains are only resolved to IP for geoip matching when that's needed).
+func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []any, useIPMatch bool) {
+	add := func(spec, tag, protocol string) {
+		if spec == "" {
+			return
+		}
+		domains, ips := parseRouteSpec(spec)
+		if len(domains) == 0 && len(ips) == 0 {
+			return
+		}
+		rule := map[string]any{"type": "field", "outboundTag": tag}
+		if len(domains) > 0 {
+			rule["domain"] = domains
+		}
+		if len(ips) > 0 {
+			rule["ip"] = ips
+			useIPMatch = true
+		}
+		rules = append(rules, rule)
+		outbounds = append(outbounds, map[string]any{"tag": tag, "protocol": protocol, "settings": map[string]any{}})
+	}
+	add(routeBlock, "block-out", "blackhole")
+	add(routeDirect, "direct-out", "freedom")
+	return outbounds, rules, useIPMatch
+}
+
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -680,6 +762,13 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 		outbounds = append(outbounds, map[string]any{"tag": "dns-out", "protocol": "dns"})
 	}
 
+	geoOutbounds, geoRules, useIPMatch := buildGeoRouting(routeDirect, routeBlock)
+	outbounds = append(outbounds, geoOutbounds...)
+	domainStrategy := "AsIs"
+	if useIPMatch {
+		domainStrategy = "IPIfNonMatch"
+	}
+
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
@@ -705,6 +794,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 			"outboundTag": "dns-out",
 		})
 	}
+	routingRules = append(routingRules, geoRules...)
 
 	// Add load balancer with health-check-based selection when two configs are provided.
 	if len(tags) > 1 {
@@ -718,7 +808,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 			},
 		}
 		configJSON["routing"] = map[string]any{
-			"domainStrategy": "AsIs",
+			"domainStrategy": domainStrategy,
 			"balancers": []any{
 				map[string]any{
 					"tag":         "balancer",
@@ -745,7 +835,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 		r["rules"] = routingRules
 	} else {
 		configJSON["routing"] = map[string]any{
-			"domainStrategy": "AsIs",
+			"domainStrategy": domainStrategy,
 			"rules":          routingRules,
 		}
 	}
@@ -754,7 +844,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 }
 
 // Generate Xray configuration for a standalone SOCKS5 upstream proxy
-func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass string) ([]byte, error) {
+func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass, routeDirect, routeBlock string) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -781,6 +871,22 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 		}
 	}
 
+	outbounds := []any{
+		map[string]any{"tag": "proxy", "protocol": "socks", "settings": map[string]any{"servers": []any{serverSettings}, "version": "5"}},
+		map[string]any{"tag": "dns-out", "protocol": "dns"},
+	}
+	geoOutbounds, geoRules, useIPMatch := buildGeoRouting(routeDirect, routeBlock)
+	outbounds = append(outbounds, geoOutbounds...)
+	domainStrategy := "AsIs"
+	if useIPMatch {
+		domainStrategy = "IPIfNonMatch"
+	}
+	routingRules := []any{
+		map[string]any{"type": "field", "network": "udp", "port": 53, "outboundTag": "dns-out"},
+	}
+	routingRules = append(routingRules, geoRules...)
+	routingRules = append(routingRules, map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"})
+
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
@@ -788,17 +894,11 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 		"policy": map[string]any{
 			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
 		},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{"tag": "proxy", "protocol": "socks", "settings": map[string]any{"servers": []any{serverSettings}, "version": "5"}},
-			map[string]any{"tag": "dns-out", "protocol": "dns"},
-		},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
 		"routing": map[string]any{
-			"domainStrategy": "AsIs",
-			"rules": []any{
-				map[string]any{"type": "field", "network": "udp", "port": 53, "outboundTag": "dns-out"},
-				map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
-			},
+			"domainStrategy": domainStrategy,
+			"rules":          routingRules,
 		},
 	}
 	return json.MarshalIndent(configJSON, "", "  ")
@@ -826,6 +926,9 @@ func main() {
 	statsSocket := flag.String("stats-socket", "", "Abstract Unix socket name for stats/status/check (Android/Linux only, e.g. vless-client)")
 	proxyUser := flag.String("proxy-user", "", "SOCKS5/HTTP proxy username (optional)")
 	proxyPass := flag.String("proxy-pass", "", "SOCKS5/HTTP proxy password (optional)")
+	assetsPath := flag.String("assets-path", "", "Directory containing geoip.dat/geosite.dat, required for geosite:/geoip: entries in -route-direct/-route-block (sets XRAY_LOCATION_ASSET)")
+	routeDirect := flag.String("route-direct", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) routed directly, bypassing the tunnel")
+	routeBlock := flag.String("route-block", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) that are blocked entirely")
 	configPath := flag.String("config", "config.yaml", "Path to YAML config file (loaded if present; explicit CLI flags override its values)")
 	flag.Parse()
 
@@ -840,12 +943,19 @@ func main() {
 		applyFileConfig(fileCfg, setFlags,
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
+			assetsPath, routeDirect, routeBlock,
 			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug)
 		log.Printf("Loaded config file %s", *configPath)
 	}
 
 	if *listen == "" {
 		log.Fatal("-listen is required")
+	}
+
+	if *assetsPath != "" {
+		if err := os.Setenv("XRAY_LOCATION_ASSET", *assetsPath); err != nil {
+			log.Fatalf("Failed to set XRAY_LOCATION_ASSET: %v", err)
+		}
 	}
 
 	var dnsList []string
@@ -895,7 +1005,7 @@ func main() {
 			Endpoint:     *wgEndpoint,
 			KeepAlive:    *wgKeepAlive,
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from flags:", err)
 		}
@@ -906,7 +1016,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to parse WireGuard config %s: %v", *wgConfigPath, err)
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
 		}
@@ -995,7 +1105,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock)
 		if err != nil {
 			log.Fatal("Failed to build Xray configuration:", err)
 		}
@@ -1006,7 +1116,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
 		}
-		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass)
+		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock)
 		if err != nil {
 			log.Fatal("Failed to build SOCKS5 Xray configuration:", err)
 		}
