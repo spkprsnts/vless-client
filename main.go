@@ -603,6 +603,19 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 			}
 		}
 		streamSettings["xhttpSettings"] = xhttp
+
+	case "kcp", "mkcp":
+		kcp := map[string]any{}
+		setUintParam(kcp, "mtu", cfg.Params["mtu"])
+		setUintParam(kcp, "tti", cfg.Params["tti"])
+		setUintParam(kcp, "uplinkCapacity", cfg.Params["uplinkCapacity"])
+		setUintParam(kcp, "downlinkCapacity", cfg.Params["downlinkCapacity"])
+		setUintParam(kcp, "cwndMultiplier", cfg.Params["cwndMultiplier"])
+		setUintParam(kcp, "maxSendingWindow", cfg.Params["maxSendingWindow"])
+		streamSettings["kcpSettings"] = kcp
+		if fm := buildKcpFinalMask(cfg.Params); fm != nil {
+			streamSettings["finalmask"] = fm
+		}
 	}
 
 	var settings map[string]any
@@ -773,6 +786,65 @@ func normalizeBandwidth(v string) string {
 		return v + "mbps"
 	}
 	return v
+}
+
+// setUintParam parses raw as an unsigned integer and sets m[key] if it's valid, leaving m
+// untouched (so Xray falls back to its own default) when raw is empty or unparseable.
+func setUintParam(m map[string]any, key, raw string) {
+	if raw == "" {
+		return
+	}
+	if v, err := strconv.ParseUint(raw, 10, 32); err == nil {
+		m[key] = v
+	}
+}
+
+// buildKcpFinalMask builds the optional mKCP "finalmask" stream-settings block from link
+// params. mKCP's old built-in header camouflage and seed-based obfuscation were removed
+// upstream in favor of finalmask masks, so:
+//   - headerType=dns|dtls|srtp|utp|wechat|wireguard picks a UDP camouflage mask that makes
+//     the traffic look like that protocol (matches the old mKCP "header type" convention)
+//   - seed=<password> is the closest replacement for the old seed-based obfuscation, mapped
+//     to the "mkcp-aes128gcm" mask
+//
+// As with Hysteria2's finalmask, fm=<url-encoded JSON> is a raw passthrough that takes
+// priority over both — it's authoritative for whichever sub-blocks it defines.
+func buildKcpFinalMask(params map[string]string) map[string]any {
+	var fm map[string]any
+	if raw := params["fm"]; raw != "" {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			fm = parsed
+		}
+	}
+
+	if ht := strings.ToLower(params["headerType"]); ht != "" && ht != "none" {
+		switch ht {
+		case "dns", "dtls", "srtp", "utp", "wechat", "wireguard":
+			if fm == nil {
+				fm = map[string]any{}
+			}
+			if _, exists := fm["udp"]; !exists {
+				fm["udp"] = []any{map[string]any{"type": "header-" + ht, "settings": map[string]any{}}}
+			}
+		}
+	}
+
+	if seed := params["seed"]; seed != "" {
+		if fm == nil {
+			fm = map[string]any{}
+		}
+		if _, exists := fm["udp"]; !exists {
+			fm["udp"] = []any{
+				map[string]any{
+					"type":     "mkcp-aes128gcm",
+					"settings": map[string]any{"password": seed},
+				},
+			}
+		}
+	}
+
+	return fm
 }
 
 // parseRouteSpec splits a comma-separated routing match spec (e.g. "geosite:cn,geoip:cn,geoip:private")

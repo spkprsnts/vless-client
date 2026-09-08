@@ -6,7 +6,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 ## Features
 
-- **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP
+- **VLESS** proxy from a `vless://` link — supports TLS, REALITY, WebSocket, gRPC, TCP, XHTTP, mKCP
 - **Trojan** proxy from a `trojan://` link — supports TLS, REALITY, and the same transports as VLESS
 - **Hysteria2** proxy from a `hysteria2://` (or `hy2://`) link — QUIC-based, tuned for lossy/high-latency networks; supports Salamander obfuscation and Brutal congestion/bandwidth tuning
 - **Mux multiplexing** to reduce DPI visibility of XHTTP connections (VLESS/Trojan only)
@@ -22,8 +22,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - Optional username/password auth on exposed SOCKS5 and HTTP proxies
 - Authenticated upstream SOCKS5 (`user:pass@host:port`)
 - Configurable DNS servers
-- HTTP metrics endpoint (`/metrics`) in wireproxy-compatible format
-- Health check endpoints (`/status`, `/check`) for monitoring
+- Stats/status/health-check via an abstract Unix domain socket (`-stats-socket`, Linux/Android only) — see [Stats socket](#stats-socket)
 - Debug logging via flag
 
 ## Installation
@@ -80,6 +79,21 @@ Hides the real SNI inside the TLS handshake from on-path DPI. Works with VLESS, 
 
 Optional `echForceQuery=none|half|full` controls how aggressively the DNS-fetched config is re-queried instead of reused from cache (default: cached, refreshed in the background).
 
+### mKCP
+
+A UDP-based transport that trades bandwidth efficiency for resilience on lossy links and, with a camouflage header, some protection against protocol fingerprinting. Works with VLESS/Trojan via `type=kcp` (or `mkcp`):
+
+```bash
+./vless-client -link "vless://UUID@host:443?security=none&type=kcp&headerType=wechat&seed=<password>" -listen 127.0.0.1:1080
+```
+
+- `mtu=`/`tti=`/`uplinkCapacity=`/`downlinkCapacity=`/`cwndMultiplier=`/`maxSendingWindow=` — optional numeric tuning, same meaning as Xray's `kcpSettings`; left at Xray's defaults if omitted
+- `headerType=dns|dtls|srtp|utp|wechat|wireguard` — disguises packets as that protocol (the old mKCP "header type" camouflage, now implemented as a `finalmask` mask)
+- `seed=<password>` — the closest replacement for mKCP's old seed-based obfuscation (mapped to the `mkcp-aes128gcm` finalmask mask); must match the server
+- `fm=<url-encoded JSON>` — raw `finalmask` passthrough for anything beyond that (e.g. `header-custom`), same convention as Hysteria2's `fm=` above; takes priority over `headerType=`/`seed=`
+
+mKCP traditionally runs with `security=none` and relies on `headerType=`/`seed=` camouflage instead of TLS (that's the whole point — looking like innocuous UDP traffic); leaving `security=tls` also works, just note the client defaults to `tls` when `security` isn't set at all, so pass `security=none` explicitly for the traditional setup.
+
 ### VLESS — dual route with load balancer
 
 Connects through both a local/CDN address and the direct server address. Automatically uses whichever is reachable (lowest RTT).
@@ -90,7 +104,7 @@ Connects through both a local/CDN address and the direct server address. Automat
   -local-address  192.168.1.1:443 \
   -direct-address server.example.com:443 \
   -listen         127.0.0.1:1080 \
-  -metrics        127.0.0.1:8080
+  -stats-socket   vless-client
 ```
 
 ### Trojan
@@ -121,9 +135,18 @@ Salamander obfuscation (hides the QUIC handshake from DPI) and Brutal congestion
 ./vless-client -link "hysteria2://auth@host:443?obfs=salamander&obfs-password=<pwd>&up=100&down=100" -listen 127.0.0.1:1080
 ```
 
-- `obfs=salamander` + `obfs-password=<pwd>` — must match the server's configuration
+- `obfs=salamander` + `obfs-password=<pwd>` (`obfs_password`/`obfsPassword` also accepted — some panels use those spellings) — must match the server's configuration
 - `up=`/`down=` — your own uplink/downlink caps in Mbps (a bare number), or a value with an explicit unit (e.g. `up=500kbps`); setting either enables Brutal congestion control by default
 - `congestion=` — override the congestion algorithm explicitly (`brutal`, `bbr`, `reno`, or `force-brutal`, which requires `up`); defaults to `brutal` when `up`/`down` is set, otherwise left to Xray's default
+
+For anything beyond that (UDP port hopping, receive-window tuning, Gecko obfuscation, etc.), pass the raw Xray `finalmask` block as JSON via `fm=` (URL-encoded) — the same escape hatch as XHTTP's `extra=`, and the same `fm=` convention used by panels like 3x-ui:
+
+```bash
+# fm={"quicParams":{"udpHop":{"ports":"20000-30000","interval":"5-10"}}}
+./vless-client -link "hysteria2://auth@host:443?fm=%7B%22quicParams%22%3A%7B%22udpHop%22%3A%7B%22ports%22%3A%2220000-30000%22%2C%22interval%22%3A%225-10%22%7D%7D%7D" -listen 127.0.0.1:1080
+```
+
+`fm=` is authoritative for whichever sub-blocks (`udp`, `quicParams`) it defines; `obfs=`/`up=`/`down=`/`congestion=` only fill in the parts it leaves unset.
 
 ### VLESS — dual route with local SOCKS5 upstream
 
@@ -135,7 +158,7 @@ Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically
   -local-socks5   127.0.0.1:1081 \
   -direct-address server.example.com:443 \
   -listen         127.0.0.1:1080 \
-  -metrics        127.0.0.1:8080
+  -stats-socket   vless-client
 ```
 
 ### Standalone SOCKS5 upstream
