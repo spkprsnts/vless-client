@@ -940,11 +940,19 @@ func parseRouteSpec(spec string) (domains []string, ips []string) {
 	return domains, ips
 }
 
-// buildGeoRouting builds the optional freedom ("direct-out") and blackhole ("block-out") outbounds
+// buildGeoRouting builds the optional freedom ("bypass-out") and blackhole ("block-out") outbounds
 // plus their routing rules for -route-direct/-route-block. Block rules are returned before direct
 // rules so a blocked entry wins even when it also falls under a broader directly-routed category.
-// useIPMatch reports whether any "ip" rule was produced, so the caller can switch domainStrategy
-// to "IPIfNonMatch" (domains are only resolved to IP for geoip matching when that's needed).
+// The returned domainStrategy is "IPIfNonMatch" if any "ip" rule was produced (domains are only
+// resolved to IP for geoip matching when that's needed), otherwise "AsIs".
+//
+// The freedom outbound is deliberately NOT tagged "direct-out": Xray's balancer selector
+// matching is prefix-based (strings.HasPrefix, see app/proxyman/outbound.Manager.Select), so a
+// dual-route balancer selecting on "direct" (main.go's "direct" outbound tag) would also match
+// "direct-out" and fold this unencrypted, untunneled freedom outbound into its candidate pool.
+// Since a raw connection almost always pings faster than one through the tunnel, leastping would
+// then route ALL general traffic (not just -route-direct's own explicit rule) through it —
+// silently bypassing the tunnel entirely. "bypass-out" shares no prefix with "direct"/"local".
 func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []any, domainStrategy string) {
 	domainStrategy = "AsIs"
 	add := func(spec, tag, protocol string) {
@@ -969,7 +977,7 @@ func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []a
 		outbounds = append(outbounds, map[string]any{"tag": tag, "protocol": protocol, "settings": map[string]any{}})
 	}
 	add(routeBlock, "block-out", "blackhole")
-	add(routeDirect, "direct-out", "freedom")
+	add(routeDirect, "bypass-out", "freedom")
 	return outbounds, rules, domainStrategy
 }
 
