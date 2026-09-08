@@ -11,7 +11,14 @@
 # --- Common (used in every mode) ---
 listen: "127.0.0.1:1080"       # SOCKS5 listen address, required
 http: ""                        # optional HTTP proxy listen address
-dns: "8.8.8.8,1.1.1.1"          # comma-separated DNS servers
+# Comma-separated DNS servers. Beyond plain IPs, each entry also accepts a scheme:
+# "tcp://host[:port]" (DNS over TCP), "https://host/path" (DoH), "quic+local://host[:port]"
+# (DoH3/DoQ), or "https+local://..."/"tcp+local://..." ("+local" resolves directly instead of
+# through routing/the tunnel). "localhost" uses the OS resolver.
+dns: "8.8.8.8,1.1.1.1"
+fakedns: false                  # hand out synthetic IPs instead of resolving for real; the real
+                                 # domain is recovered via sniffing for routing. Useful for
+                                 # apps/protocols that resolve via IP before connecting.
 debug: false                    # verbose xray-core logging
 stats_socket: ""                # abstract unix socket name for stats (Linux/Android)
 proxy_user: ""                  # SOCKS5/HTTP inbound auth (optional)

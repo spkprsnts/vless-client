@@ -21,7 +21,8 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - Optional HTTP proxy on a separate port
 - Optional username/password auth on exposed SOCKS5 and HTTP proxies
 - Authenticated upstream SOCKS5 (`user:pass@host:port`)
-- Configurable DNS servers
+- Configurable DNS servers, including DoH/DoT/DoQ and local-vs-tunneled resolution
+- **FakeDNS** — hand out synthetic IPs instead of resolving for real, for apps/protocols that need an IP before connecting
 - Stats/status/health-check via an abstract Unix domain socket (`-stats-socket`, Linux/Android only) — see [Stats socket](#stats-socket)
 - Debug logging via flag
 
@@ -251,6 +252,45 @@ automatically switches to `IPIfNonMatch` so domains get resolved for IP matching
   -route-block "geosite:category-ads-all"
 ```
 
+## DNS
+
+`-dns` (or `dns` in the YAML config) is a comma-separated list of servers used for the client's own domain
+resolution (e.g. matching `geoip:`/CIDR routing rules, or dialing `-direct-address`/`-local-address` when
+they're hostnames). Each entry can be a plain IP (classic UDP DNS) or a scheme:
+
+| Scheme | Meaning |
+|---|---|
+| `tcp://host[:port]` | DNS over TCP, routed through the tunnel like any other traffic |
+| `tcp+local://host[:port]` | DNS over TCP, resolved directly instead of through the tunnel |
+| `https://host/path` | DNS-over-HTTPS (DoH), routed through the tunnel |
+| `https+local://host/path` | DoH, resolved directly |
+| `h2c://...` / `h2c+local://...` | Same as the two above, but plaintext HTTP/2 (h2c) instead of TLS |
+| `quic+local://host[:port]` | DNS-over-QUIC (DoQ), resolved directly |
+| `localhost` | Use the OS's own resolver |
+
+"Routed through the tunnel" means the DNS query itself is dispatched like normal traffic (through your
+routing rules, typically ending up in the proxy tunnel) — useful for hiding DNS queries from your ISP.
+"`+local`" variants bypass the tunnel/routing and query directly from the machine running vless-client.
+
+```bash
+./vless-client -link "vless://..." -listen 127.0.0.1:1080 -dns "https://1.1.1.1/dns-query,tcp+local://8.8.8.8"
+```
+
+### FakeDNS
+
+`-fakedns` (or `fakedns: true`) makes every DNS lookup return a synthetic IP instead of a real one — no
+DNS query ever leaves the machine. When an app then connects to that fake IP, sniffing (already enabled on
+both inbounds) recovers the real domain so routing — including `-route-direct`/`-route-block` geosite/geoip
+rules — still applies as if the domain had been resolved normally.
+
+This matters for apps or protocols that resolve a hostname to an IP before connecting (rather than handing
+the domain itself to the SOCKS5/HTTP proxy, which already works fine without FakeDNS) — it saves a real DNS
+round-trip and keeps the domain, not just an IP, visible to routing decisions in that case.
+
+```bash
+./vless-client -link "vless://..." -listen 127.0.0.1:1080 -fakedns
+```
+
 ## Flags
 
 | Flag | Default | Description |
@@ -270,7 +310,8 @@ automatically switches to `IPIfNonMatch` so domains get resolved for IP matching
 | `-wg-mtu` | | WireGuard MTU (optional) |
 | `-wg-keepalive` | | Persistent keepalive in seconds (optional) |
 | `-http` | | Optional HTTP proxy address `ip:port` |
-| `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers |
+| `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers — see [DNS](#dns) for supported schemes |
+| `-fakedns` | `false` | Hand out synthetic IPs instead of resolving for real; see [DNS](#dns) |
 | `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
 | `-mux` | `0` | Enable Mux multiplexing with given concurrency (e.g. `8`); `0` disables. Incompatible with `flow=xtls-rprx-vision` |
