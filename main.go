@@ -446,6 +446,16 @@ func paramAlias(params map[string]string, name, alias string) string {
 	return params[alias]
 }
 
+// firstParam returns the first non-empty value among the given keys, in order.
+func firstParam(params map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := params[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // applyECHParams adds Encrypted Client Hello settings to a tlsSettings map from the
 // echConfigList/echForceQuery link params ("ech" is accepted as an alias for echConfigList,
 // matching 3x-ui's share links). echConfigList is either a raw base64-encoded ECHConfigList
@@ -546,7 +556,9 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 		if v := cfg.Params["authority"]; v != "" {
 			grpc["authority"] = v
 		}
-		if v := cfg.Params["multiMode"]; v == "1" || v == "true" {
+		// multiMode=1/true is this client's own naming; mode=multi is what 3x-ui puts
+		// in its generated links, so both are accepted.
+		if v := cfg.Params["multiMode"]; v == "1" || v == "true" || strings.EqualFold(cfg.Params["mode"], "multi") {
 			grpc["multiMode"] = true
 		}
 		streamSettings["grpcSettings"] = grpc
@@ -605,6 +617,14 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 			},
 		}
 	} else {
+		// Xray's VLESS outbound rejects the whole config at startup if "encryption" isn't
+		// exactly "none" (or a valid post-quantum ML-KEM string), so default it here rather
+		// than let a link that omits the param (in practice, essentially none do) crash the
+		// whole client at boot.
+		encryption := cfg.Params["encryption"]
+		if encryption == "" {
+			encryption = "none"
+		}
 		settings = map[string]any{
 			"vnext": []any{
 				map[string]any{
@@ -613,7 +633,7 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 					"users": []any{
 						map[string]any{
 							"id":         cfg.Credential,
-							"encryption": cfg.Params["encryption"],
+							"encryption": encryption,
 							"flow":       cfg.Params["flow"],
 						},
 					},
@@ -689,37 +709,56 @@ func buildHysteriaOutbound(cfg *ProxyConfig, tag string) map[string]any {
 func buildHysteriaFinalMask(params map[string]string) map[string]any {
 	var fm map[string]any
 
+	// fm=<url-encoded JSON> is a raw passthrough for the whole finalmask block — the same
+	// escape hatch xhttp's "extra" param provides, but for Hysteria2/QUIC tuning (matches
+	// the convention used by panels like 3x-ui for anything beyond basic Salamander/bandwidth:
+	// gecko obfuscation, UDP port hopping, receive windows, etc.). Whatever it defines is
+	// treated as authoritative; the simpler obfs=/up=/down=/congestion= params below only
+	// fill in the "udp"/"quicParams" sub-blocks it left unset.
+	if raw := params["fm"]; raw != "" {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			fm = parsed
+		}
+	}
+
 	if strings.EqualFold(params["obfs"], "salamander") {
-		fm = map[string]any{
-			"udp": []any{
+		if fm == nil {
+			fm = map[string]any{}
+		}
+		if _, exists := fm["udp"]; !exists {
+			password := firstParam(params, "obfs-password", "obfs_password", "obfsPassword")
+			fm["udp"] = []any{
 				map[string]any{
 					"type":     "salamander",
-					"settings": map[string]any{"password": params["obfs-password"]},
+					"settings": map[string]any{"password": password},
 				},
-			},
+			}
 		}
 	}
 
 	up, down, congestion := params["up"], params["down"], params["congestion"]
 	if up != "" || down != "" || congestion != "" {
-		quicParams := map[string]any{}
-		if congestion != "" {
-			quicParams["congestion"] = strings.ToLower(congestion)
-		} else {
-			// Hysteria2's whole design point is client-declared bandwidth caps driving
-			// Brutal congestion control, so default to "brutal" whenever up/down is set.
-			quicParams["congestion"] = "brutal"
-		}
-		if up != "" {
-			quicParams["brutalUp"] = normalizeBandwidth(up)
-		}
-		if down != "" {
-			quicParams["brutalDown"] = normalizeBandwidth(down)
-		}
 		if fm == nil {
 			fm = map[string]any{}
 		}
-		fm["quicParams"] = quicParams
+		if _, exists := fm["quicParams"]; !exists {
+			quicParams := map[string]any{}
+			if congestion != "" {
+				quicParams["congestion"] = strings.ToLower(congestion)
+			} else {
+				// Hysteria2's whole design point is client-declared bandwidth caps driving
+				// Brutal congestion control, so default to "brutal" whenever up/down is set.
+				quicParams["congestion"] = "brutal"
+			}
+			if up != "" {
+				quicParams["brutalUp"] = normalizeBandwidth(up)
+			}
+			if down != "" {
+				quicParams["brutalDown"] = normalizeBandwidth(down)
+			}
+			fm["quicParams"] = quicParams
+		}
 	}
 
 	return fm
