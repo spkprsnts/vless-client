@@ -80,6 +80,20 @@ Hides the real SNI inside the TLS handshake from on-path DPI. Works with VLESS, 
 
 Optional `echForceQuery=none|half|full` controls how aggressively the DNS-fetched config is re-queried instead of reused from cache (default: cached, refreshed in the background).
 
+### More TLS/REALITY/TCP parameters
+
+A few more link params for VLESS/Trojan, matching the short names Xray's own code recommends (and the same ones 3x-ui's share links use):
+
+- `vcn=<name>` (`verifyPeerCertByName`) — verify the peer cert against a specific name instead of `sni`, for `security=tls`
+- `pqv=<key>` (`mldsa65Verify`) — REALITY's post-quantum ML-DSA-65 verification key, for `security=reality`
+- `headerType=http` on plain `type=tcp` — disguises the connection as plaintext HTTP (fake request line + headers), read from `path=`/`host=` (comma-separated for multiple, matching Xray's own `tcpSettings`)
+- `fm=<url-encoded JSON>` — raw Xray `finalmask` passthrough, same as Hysteria2/mKCP's `fm=` below, but available on **any** transport (e.g. TCP fragment/sudoku masks)
+
+```bash
+./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com&vcn=host.example.com" -listen 127.0.0.1:1080
+./vless-client -link "vless://UUID@host:443?type=tcp&security=none&headerType=http&path=/&host=www.example.com" -listen 127.0.0.1:1080
+```
+
 ### mKCP
 
 A UDP-based transport that trades bandwidth efficiency for resilience on lossy links and, with a camouflage header, some protection against protocol fingerprinting. Works with VLESS/Trojan via `type=kcp` (or `mkcp`):
@@ -122,9 +136,9 @@ Same transport/TLS/REALITY query parameters as VLESS (`type`, `security`, `sni`,
 ./vless-client -link "hysteria2://auth@host:443?sni=host.example.com" -listen 127.0.0.1:1080
 ```
 
-`hy2://` is accepted as an alias for `hysteria2://`. Supports `auth`, `sni`, `alpn`, `pinnedPeerCertSha256`, Salamander obfuscation, and congestion/bandwidth tuning. `-mux` doesn't apply to Hysteria2 (QUIC already multiplexes streams).
+`hy2://` is accepted as an alias for `hysteria2://`. Supports `auth`, `sni`, `alpn`, `pinnedPeerCertSha256`, `verifyPeerCertByName`, Salamander/Gecko obfuscation, UDP port hopping, and congestion/bandwidth tuning. `-mux` doesn't apply to Hysteria2 (QUIC already multiplexes streams).
 
-Self-signed certs: since `allowInsecure` was removed upstream, pin the cert instead:
+Self-signed certs: since `allowInsecure` was removed upstream, pin the cert instead. `pinSHA256` (the original hysteria2 URI scheme's name for it, as used by some panels) is accepted as an alias for `pinnedPeerCertSha256`/`pcs`:
 
 ```bash
 ./vless-client -link "hysteria2://auth@host:443?pinnedPeerCertSha256=<hex-sha256>" -listen 127.0.0.1:1080
@@ -137,10 +151,12 @@ Salamander obfuscation (hides the QUIC handshake from DPI) and Brutal congestion
 ```
 
 - `obfs=salamander` + `obfs-password=<pwd>` (`obfs_password`/`obfsPassword` also accepted — some panels use those spellings) — must match the server's configuration
+- `obfs=gecko` is also accepted as an alias for `salamander` (some panels emit it as a distinct obfuscation mode with an extra padding-size range); this build's Salamander implementation only has a password, so it behaves identically to plain `salamander` here — the padding-range tuning some links attach to it has nothing to bind to
 - `up=`/`down=` — your own uplink/downlink caps in Mbps (a bare number), or a value with an explicit unit (e.g. `up=500kbps`); setting either enables Brutal congestion control by default
 - `congestion=` — override the congestion algorithm explicitly (`brutal`, `bbr`, `reno`, or `force-brutal`, which requires `up`); defaults to `brutal` when `up`/`down` is set, otherwise left to Xray's default
+- `mport=<port-or-range>` — enables UDP port hopping (e.g. `mport=20000-30000`)
 
-For anything beyond that (UDP port hopping, receive-window tuning, Gecko obfuscation, etc.), pass the raw Xray `finalmask` block as JSON via `fm=` (URL-encoded) — the same escape hatch as XHTTP's `extra=`, and the same `fm=` convention used by panels like 3x-ui:
+For anything beyond that (receive-window tuning, etc.), pass the raw Xray `finalmask` block as JSON via `fm=` (URL-encoded) — the same escape hatch as XHTTP's `extra=`, and the same `fm=` convention used by panels like 3x-ui. `fm=` is authoritative for whichever sub-blocks (`udp`, `quicParams`) it defines, so it takes priority over `obfs=`/`up=`/`down=`/`congestion=`/`mport=`:
 
 ```bash
 # fm={"quicParams":{"udpHop":{"ports":"20000-30000","interval":"5-10"}}}
