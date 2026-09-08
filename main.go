@@ -99,6 +99,7 @@ type FileConfig struct {
 	LocalAddress   string `yaml:"local_address"`
 	DirectAddress  string `yaml:"direct_address"`
 	LocalSocks5    string `yaml:"local_socks5"`
+	Socks5Chain    *bool  `yaml:"socks5_chain"`
 	HCInterval     *int   `yaml:"hc_interval"`
 	Mux            *int   `yaml:"mux"`
 	Debug          *bool  `yaml:"debug"`
@@ -131,7 +132,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -173,6 +174,7 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("route-direct", routeDirect, fc.RouteDirect)
 	str("route-block", routeBlock, fc.RouteBlock)
 	boolp("fakedns", fakeDNS, fc.FakeDNS)
+	boolp("socks5-chain", socks5Chain, fc.Socks5Chain)
 }
 
 // Simple INI parser for WireGuard config
@@ -988,8 +990,41 @@ func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []a
 	return outbounds, rules, useIPMatch
 }
 
+// buildSocks5Outbound builds a plain SOCKS5 outbound (no protocol wrapping) pointed at
+// localSocks5, used both as an alternate route in the load-balancer mode and as the
+// underlying dial target in -socks5-chain mode.
+func buildSocks5Outbound(tag, localSocks5, localSocks5User, localSocks5Pass string) map[string]any {
+	host, portStr, _ := net.SplitHostPort(localSocks5)
+	port, _ := strconv.Atoi(portStr)
+	serverSettings := map[string]any{"address": host, "port": port}
+	if localSocks5User != "" || localSocks5Pass != "" {
+		serverSettings["users"] = []any{
+			map[string]any{"user": localSocks5User, "pass": localSocks5Pass},
+		}
+	}
+	return map[string]any{
+		"tag":      tag,
+		"protocol": "socks",
+		"settings": map[string]any{
+			"servers": []any{serverSettings},
+			"version": "5",
+		},
+	}
+}
+
+// setDialerProxy points an outbound's streamSettings.sockopt.dialerProxy at tag, so its
+// underlying connection is dialed through that other tagged outbound instead of directly.
+func setDialerProxy(outbound map[string]any, tag string) {
+	streamSettings, _ := outbound["streamSettings"].(map[string]any)
+	if streamSettings == nil {
+		streamSettings = map[string]any{}
+		outbound["streamSettings"] = streamSettings
+	}
+	streamSettings["sockopt"] = map[string]any{"dialerProxy": tag}
+}
+
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1003,27 +1038,29 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 	// Outbounds
 	var outbounds []any
 	var tags []string
-	if localSocks5 != "" {
+	if socks5Chain && chainDualRoute {
+		// Same destination (cfgs[0]), two dial paths: "direct" connects straight to it and is
+		// preferred by the balancer below; "local" is the same proxy config but chained through
+		// localSocks5 via dialerProxy, used as a fallback if the direct path is unreachable.
 		tags = []string{"local", "direct"}
-		host, portStr, _ := net.SplitHostPort(localSocks5)
-		port, _ := strconv.Atoi(portStr)
-
-		serverSettings := map[string]any{"address": host, "port": port}
-		if localSocks5User != "" || localSocks5Pass != "" {
-			serverSettings["users"] = []any{
-				map[string]any{"user": localSocks5User, "pass": localSocks5Pass},
-			}
-		}
-
-		outbounds = append(outbounds, map[string]any{
-			"tag":      "local",
-			"protocol": "socks",
-			"settings": map[string]any{
-				"servers": []any{serverSettings},
-				"version": "5",
-			},
-		})
-
+		localOutbound := buildOutbound(cfgs[0], "local", muxConcurrency)
+		setDialerProxy(localOutbound, "socks5-chain-out")
+		outbounds = append(outbounds,
+			localOutbound,
+			buildOutbound(cfgs[0], "direct", muxConcurrency),
+			buildSocks5Outbound("socks5-chain-out", localSocks5, localSocks5User, localSocks5Pass),
+		)
+	} else if socks5Chain {
+		// VLESS/Trojan-over-SOCKS5: the proxy protocol itself dials through localSocks5
+		// (via streamSettings.sockopt.dialerProxy) instead of treating it as an alternate
+		// route, so a local upstream (Tor, another VPN's local proxy, etc.) becomes the
+		// transport hop the real proxy server is reached through.
+		proxyOutbound := buildOutbound(cfgs[0], "proxy", muxConcurrency)
+		setDialerProxy(proxyOutbound, "socks5-chain-out")
+		outbounds = []any{proxyOutbound, buildSocks5Outbound("socks5-chain-out", localSocks5, localSocks5User, localSocks5Pass)}
+	} else if localSocks5 != "" {
+		tags = []string{"local", "direct"}
+		outbounds = append(outbounds, buildSocks5Outbound("local", localSocks5, localSocks5User, localSocks5Pass))
 		// cfgs[0] is the direct proxy config
 		outbounds = append(outbounds, buildOutbound(cfgs[0], "direct", muxConcurrency))
 	} else if len(cfgs) == 1 {
@@ -1036,7 +1073,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 	}
 
 	var finalDNS = dns
-	if localSocks5 != "" {
+	if localSocks5 != "" && !socks5Chain {
 		var tcpDNS []string
 		for _, d := range dns {
 			tcpDNS = append(tcpDNS, "tcp://"+d)
@@ -1070,7 +1107,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 	}
 
 	var routingRules []any
-	if localSocks5 != "" {
+	if localSocks5 != "" && !socks5Chain {
 		routingRules = append(routingRules, map[string]any{
 			"type":        "field",
 			"network":     "udp",
@@ -1205,6 +1242,7 @@ func main() {
 	localAddress := flag.String("local-address", "", "Override proxy destination to this host:port (local/CDN route)")
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of the local route if -link and -direct-address are set")
+	socks5Chain := flag.Bool("socks5-chain", false, "With -link and -local-socks5: dial the proxy link's own connection through -local-socks5 (VLESS/Trojan-over-SOCKS5) instead of treating it as an alternate route. Not supported for hysteria2. Incompatible with -direct-address")
 	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
 	muxConcurrency := flag.Int("mux", 0, "Enable Mux multiplexing with given concurrency (e.g. 8); 0 disables")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
@@ -1230,7 +1268,7 @@ func main() {
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
 			assetsPath, routeDirect, routeBlock,
-			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS)
+			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
 	}
 
@@ -1326,8 +1364,55 @@ func main() {
 			cfg.Params["sni"] = cfg.Address
 		}
 		var cfgs []*ProxyConfig
+		var chainDualRoute bool
 
-		if parsedLocalSocks5 != "" {
+		if *socks5Chain {
+			if cfg.Protocol == "hysteria2" {
+				log.Fatal("-socks5-chain is not supported for hysteria2 (its QUIC dialer can't chain through a SOCKS5 hop)")
+			}
+			if parsedLocalSocks5 == "" {
+				log.Fatal("-socks5-chain requires -local-socks5 to be set")
+			}
+			if _, _, err := net.SplitHostPort(parsedLocalSocks5); err != nil {
+				log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
+			}
+			if *directAddress != "" {
+				// Dual route: always reach the same server, preferring a direct connection
+				// and falling back to the same address dialed through -local-socks5 (chained)
+				// if the direct path is unreachable.
+				chainDualRoute = true
+				if *localAddress != "" {
+					log.Fatal("-local-address cannot be used together with -socks5-chain and -direct-address")
+				}
+				host, portStr, err := net.SplitHostPort(*directAddress)
+				if err != nil {
+					log.Fatalf("Invalid -direct-address %q: %v", *directAddress, err)
+				}
+				port, err := strconv.Atoi(portStr)
+				if err != nil {
+					log.Fatalf("Invalid port in -direct-address %q: %v", *directAddress, err)
+				}
+				cfg.Address = host
+				cfg.Port = port
+				cfgs = []*ProxyConfig{cfg}
+				log.Printf("Using load balancer: direct route to %s:%d, SOCKS5-chained (%s) route to the same address", host, port, parsedLocalSocks5)
+			} else {
+				if *localAddress != "" {
+					host, portStr, err := net.SplitHostPort(*localAddress)
+					if err != nil {
+						log.Fatalf("Invalid -local-address %q: %v", *localAddress, err)
+					}
+					port, err := strconv.Atoi(portStr)
+					if err != nil {
+						log.Fatalf("Invalid port in -local-address %q: %v", *localAddress, err)
+					}
+					cfg.Address = host
+					cfg.Port = port
+				}
+				cfgs = []*ProxyConfig{cfg}
+				log.Printf("Using %s chained through local SOCKS5 %s", cfg.Protocol, parsedLocalSocks5)
+			}
+		} else if parsedLocalSocks5 != "" {
 			if *directAddress == "" {
 				log.Fatal("When used with -link, -local-socks5 requires -direct-address to be specified for load balancing")
 			}
@@ -1391,7 +1476,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS, *socks5Chain, chainDualRoute)
 		if err != nil {
 			log.Fatal("Failed to build Xray configuration:", err)
 		}

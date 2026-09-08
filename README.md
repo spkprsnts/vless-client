@@ -14,6 +14,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 - **WireGuard** tunnel — from a standard `.conf` file or individual CLI flags
 - **Standalone SOCKS5** upstream proxy mode
 - **Dual-route** mode with automatic failover and load balancing
+- **VLESS/Trojan over SOCKS5** — chain the proxy link's own connection through a local SOCKS5 upstream (`-socks5-chain`)
 - **Geosite/geoip routing** — bypass or block traffic by domain/IP category before it reaches the tunnel
 - **ECH (Encrypted Client Hello)** for VLESS/Trojan/Hysteria2 over TLS — hides the real SNI from DPI, with automatic DNS-based config fetch
 - Optional **YAML config file** (`-config`, default `config.yaml`) — CLI flags always override its values
@@ -178,6 +179,33 @@ Connects through a local SOCKS5 proxy and the direct VLESS server. Automatically
   -stats-socket   vless-client
 ```
 
+### VLESS/Trojan over SOCKS5 (chain)
+
+`-socks5-chain` changes what `-local-socks5` means: instead of being an alternate route (the dual-route mode above), it becomes the transport hop the proxy link's own connection is dialed through — VLESS/Trojan running *on top of* a local SOCKS5 upstream (e.g. Tor, another VPN's local proxy, or anything else already listening as a SOCKS5 proxy on this machine), rather than just using that SOCKS5 proxy directly. Internally this sets the outbound's `streamSettings.sockopt.dialerProxy` to a plain SOCKS5 outbound pointed at `-local-socks5` — the same pattern as [chaining VLESS through an upstream SOCKS5 in raw Xray config](https://github.com/spkprsnts/WireTurn/issues/15#issuecomment-5545513870).
+
+```bash
+./vless-client \
+  -link          "vless://UUID@host:port?security=reality&..." \
+  -local-socks5  127.0.0.1:9050 \
+  -socks5-chain \
+  -listen        127.0.0.1:1080
+```
+
+Not supported for Hysteria2 — its QUIC dialer manages its own UDP socket directly and doesn't go through Xray's generic dialer, so it can't be chained through a SOCKS5 hop this way.
+
+Add `-direct-address` to get a dual-route version of chaining: both routes reach the **same** server, one connecting to it directly (preferred) and the other reaching it through `-local-socks5` (chained), automatically falling back to the chained route if the direct one is unreachable — useful when the direct path to the server gets blocked but the SOCKS5 upstream still has a way through:
+
+```bash
+./vless-client \
+  -link           "vless://UUID@host:port?security=reality&..." \
+  -local-socks5   127.0.0.1:9050 \
+  -direct-address server.example.com:443 \
+  -socks5-chain \
+  -listen         127.0.0.1:1080
+```
+
+`-local-address` can't be combined with `-socks5-chain` + `-direct-address` (there's only one address in this mode — `-direct-address` — reached two ways), but still works normally with plain `-socks5-chain` alone, to override where the link itself points while still dialing through the SOCKS5 hop.
+
 ### Standalone SOCKS5 upstream
 
 Use an existing SOCKS5 proxy as the upstream without any tunnel:
@@ -316,7 +344,8 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-config` | `config.yaml` | Path to YAML config file (loaded if present; CLI flags override its values) |
 | `-local-address` | | Override link destination `host:port` (local/CDN route) |
 | `-direct-address` | | Direct server `host:port`; enables load balancing between local and direct routes |
-| `-local-socks5` | | Local SOCKS5 proxy `[user:pass@]host:port`. Used as standalone upstream, or as the local route when `-link` and `-direct-address` are also set |
+| `-local-socks5` | | Local SOCKS5 proxy `[user:pass@]host:port`. Used as standalone upstream, as the local route when `-link` and `-direct-address` are also set, or as the transport hop when `-socks5-chain` is set |
+| `-socks5-chain` | `false` | With `-link` and `-local-socks5`: dial the proxy link's own connection through `-local-socks5` instead of treating it as an alternate route. Add `-direct-address` for a dual-route version (same server, direct preferred, chained fallback). Not supported for hysteria2 |
 | `-wg` | | Path to WireGuard `.conf` file |
 | `-wg-private-key` | | WireGuard private key |
 | `-wg-public-key` | | WireGuard peer public key |

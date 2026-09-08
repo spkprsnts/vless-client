@@ -51,6 +51,15 @@ wg: ""                          # path to a WireGuard .conf file
 # --- Mode: standalone upstream SOCKS5 (no VLESS/WireGuard) ---
 local_socks5: ""                # [user:pass@]host:port
 
+# With both "link" and "local_socks5" set, socks5_chain switches local_socks5 from an
+# alternate route (the load-balancer dual-route mode above) to a transport hop: the proxy
+# link's own connection is dialed through local_socks5 instead (VLESS/Trojan-over-SOCKS5,
+# e.g. chaining through Tor or another VPN's local proxy). Not supported for hysteria2.
+# Add direct_address too for a dual-route version: same server, reached both directly
+# (preferred) and chained through local_socks5 (fallback) — local_address can't be used
+# together with socks5_chain + direct_address, since there's only the one address then.
+socks5_chain: false
+
 # --- Routing (applies to every mode) ---
 # Entries are comma-separated; each is "geosite:name", "geoip:name", a plain domain, or a CIDR.
 # geosite:/geoip: entries require geoip.dat/geosite.dat in assets_path (or XRAY_LOCATION_ASSET) —
