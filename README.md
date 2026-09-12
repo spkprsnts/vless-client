@@ -359,6 +359,7 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-fakedns` | `false` | Hand out synthetic IPs instead of resolving for real; see [DNS](#dns) |
 | `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
+| `-hc-destination` | `http://connectivitycheck.gstatic.com/generate_204` | URL probed by the load balancer's health check (dual-route mode) |
 | `-mux` | `0` | Enable Mux multiplexing with given concurrency (e.g. `8`); `0` disables. Incompatible with `flow=xtls-rprx-vision` |
 | `-proxy-user` | | Username for the exposed SOCKS5/HTTP proxy |
 | `-proxy-pass` | | Password for the exposed SOCKS5/HTTP proxy |

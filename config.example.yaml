@@ -31,6 +31,7 @@ link: "hysteria2://auth@host:443?sni=example.com#My-Server"   # hy2:// also acce
 local_address: ""               # override link destination host:port (local/CDN route)
 direct_address: ""              # direct server host:port; enables load balancing with local_address
 hc_interval: 30                 # load balancer health check interval, seconds
+hc_destination: ""              # URL probed by the load balancer's health check (default: http://connectivitycheck.gstatic.com/generate_204)
 mux: 0                          # mux concurrency; 0 disables. Not applicable to hysteria2
 
 # TLS cert pinning (all three protocols): use pinnedPeerCertSha256=<hex> in the link's

@@ -101,6 +101,7 @@ type FileConfig struct {
 	LocalSocks5    string `yaml:"local_socks5"`
 	Socks5Chain    *bool  `yaml:"socks5_chain"`
 	HCInterval     *int   `yaml:"hc_interval"`
+	HCDestination  string `yaml:"hc_destination"`
 	Mux            *int   `yaml:"mux"`
 	Debug          *bool  `yaml:"debug"`
 	StatsSocket    string `yaml:"stats_socket"`
@@ -132,7 +133,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -165,6 +166,7 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("direct-address", directAddress, fc.DirectAddress)
 	str("local-socks5", localSocks5, fc.LocalSocks5)
 	intp("hc-interval", hcInterval, fc.HCInterval)
+	str("hc-destination", hcDestination, fc.HCDestination)
 	intp("mux", muxConcurrency, fc.Mux)
 	boolp("debug", debug, fc.Debug)
 	str("stats-socket", statsSocket, fc.StatsSocket)
@@ -1028,7 +1030,7 @@ func setDialerProxy(outbound map[string]any, tag string) {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock, hcDestination string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1122,7 +1124,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 		configJSON["burstObservatory"] = map[string]any{
 			"subjectSelector": tags,
 			"pingConfig": map[string]any{
-				"destination": "http://connectivitycheck.gstatic.com/generate_204",
+				"destination": hcDestination,
 				"interval":    fmt.Sprintf("%ds", hcInterval),
 				"sampling":    3,
 				"timeout":     "5s",
@@ -1244,6 +1246,7 @@ func main() {
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of the local route if -link and -direct-address are set")
 	socks5Chain := flag.Bool("socks5-chain", false, "With -link and -local-socks5: dial the proxy link's own connection through -local-socks5 (VLESS/Trojan-over-SOCKS5) instead of treating it as an alternate route. Add -direct-address for a dual-route version (same server, direct preferred, chained fallback). Not supported for hysteria2")
 	hcInterval := flag.Int("hc-interval", 30, "Load balancer health check interval in seconds")
+	hcDestination := flag.String("hc-destination", "http://connectivitycheck.gstatic.com/generate_204", "URL probed by the load balancer's health check")
 	muxConcurrency := flag.Int("mux", 0, "Enable Mux multiplexing with given concurrency (e.g. 8); 0 disables")
 	debug := flag.Bool("debug", false, "Enable xray-core debug logging")
 	statsSocket := flag.String("stats-socket", "", "Abstract Unix socket name for stats/status/check (Android/Linux only, e.g. vless-client)")
@@ -1267,7 +1270,7 @@ func main() {
 		applyFileConfig(fileCfg, setFlags,
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
-			assetsPath, routeDirect, routeBlock,
+			assetsPath, routeDirect, routeBlock, hcDestination,
 			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
 	}
@@ -1448,7 +1451,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS, *socks5Chain, chainDualRoute)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *hcDestination, *fakeDNS, *socks5Chain, chainDualRoute)
 		if err != nil {
 			log.Fatal("Failed to build Xray configuration:", err)
 		}
