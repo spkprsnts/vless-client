@@ -29,7 +29,7 @@ Created as a companion tool for [WireTurn](https://github.com/spkprsnts/WireTurn
 
 ## Installation
 
-**Requirements:** Go 1.22+
+**Requirements:** Go 1.27+
 
 ```bash
 git clone https://github.com/spkprsnts/vless-client
@@ -48,11 +48,13 @@ go build -o vless-client .
 With anti-DPI obfuscation for XHTTP (when RKN/DPI blocks the connection), pass the settings via the `extra` query parameter in the VLESS link as a URL-encoded JSON object — the server admin includes these when sharing the link:
 
 ```bash
-# extra={"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","uplinkHTTPMethod":"PUT","sessionPlacement":"query"}
+# extra={"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","uplinkHTTPMethod":"PUT","sessionIDPlacement":"query"}
 ./vless-client \
-  -link   "vless://UUID@host:port?type=xhttp&security=reality&...&extra=%7B%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingMethod%22%3A%22tokenish%22%2C%22uplinkHTTPMethod%22%3A%22PUT%22%2C%22sessionPlacement%22%3A%22query%22%7D" \
+  -link   "vless://UUID@host:port?type=xhttp&security=reality&...&extra=%7B%22xPaddingObfsMode%22%3Atrue%2C%22xPaddingMethod%22%3A%22tokenish%22%2C%22uplinkHTTPMethod%22%3A%22PUT%22%2C%22sessionIDPlacement%22%3A%22query%22%7D" \
   -listen 127.0.0.1:1080
 ```
+
+Xray renamed `sessionPlacement`/`sessionKey` to `sessionIDPlacement`/`sessionIDKey`; links from older panels that still use the old names are converted automatically.
 
 With a local/CDN address override:
 
@@ -79,8 +81,6 @@ Hides the real SNI inside the TLS handshake from on-path DPI. Works with VLESS, 
 - a raw base64-encoded ECHConfigList, or
 - a DNS-query spec resolved automatically: `<dnsserver>` (queries the link's `sni` for an HTTPS/ECH record) or `<domain>+<dnsserver>` to query a different domain than `sni` — `dnsserver` can be `udp://ip[:port]`, `https://.../dns-query` (DoH), or `h2c://...`
 
-Optional `echForceQuery=none|half|full` controls how aggressively the DNS-fetched config is re-queried instead of reused from cache (default: cached, refreshed in the background).
-
 ### More TLS/REALITY/TCP parameters
 
 A few more link params for VLESS/Trojan, matching the short names Xray's own code recommends (and the same ones 3x-ui's share links use):
@@ -92,23 +92,25 @@ A few more link params for VLESS/Trojan, matching the short names Xray's own cod
 
 ```bash
 ./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com&vcn=host.example.com" -listen 127.0.0.1:1080
-./vless-client -link "vless://UUID@host:443?type=tcp&security=none&headerType=http&path=/&host=www.example.com" -listen 127.0.0.1:1080
+./vless-client -link "vless://UUID@192.168.1.10:443?type=tcp&security=none&headerType=http&path=/&host=www.example.com" -listen 127.0.0.1:1080
 ```
+
+**Unencrypted links:** Xray refuses to start a VLESS/Trojan outbound with `security=none` when the server address is a public IP or domain. Only private IPs/domains are exempt, as is VLESS with post-quantum `encryption=` (anything other than `none`). Use `security=tls` or `security=reality` for servers on the public Internet.
 
 ### mKCP
 
 A UDP-based transport that trades bandwidth efficiency for resilience on lossy links and, with a camouflage header, some protection against protocol fingerprinting. Works with VLESS/Trojan via `type=kcp` (or `mkcp`):
 
 ```bash
-./vless-client -link "vless://UUID@host:443?security=none&type=kcp&headerType=wechat&seed=<password>" -listen 127.0.0.1:1080
+./vless-client -link "vless://UUID@host:443?security=tls&type=kcp&headerType=wechat" -listen 127.0.0.1:1080
 ```
 
 - `mtu=`/`tti=`/`uplinkCapacity=`/`downlinkCapacity=`/`cwndMultiplier=`/`maxSendingWindow=` — optional numeric tuning, same meaning as Xray's `kcpSettings`; left at Xray's defaults if omitted
-- `headerType=dns|dtls|srtp|utp|wechat|wireguard` — disguises packets as that protocol (the old mKCP "header type" camouflage, now implemented as a `finalmask` mask)
-- `seed=<password>` — the closest replacement for mKCP's old seed-based obfuscation (mapped to the `mkcp-aes128gcm` finalmask mask); must match the server
-- `fm=<url-encoded JSON>` — raw `finalmask` passthrough for anything beyond that (e.g. `header-custom`), same convention as Hysteria2's `fm=` above; takes priority over `headerType=`/`seed=`
+- `headerType=dns|dtls|srtp|utp|wechat|wireguard` — disguises packets as that protocol (the old mKCP "header type" camouflage, now Xray's `mkcp-legacy` finalmask mask)
+- `seed=<password>` — the closest replacement for mKCP's old seed-based obfuscation (also `mkcp-legacy`, AES-128-GCM); must match the server. Ignored when `headerType=` is set
+- `fm=<url-encoded JSON>` — raw `finalmask` passthrough for anything beyond that (e.g. `header-custom`), same convention as Hysteria2's `fm=` above; takes priority over `headerType=`/`seed=`. The old `header-<name>`/`mkcp-original`/`mkcp-aes128gcm` mask types from older panels are converted to `mkcp-legacy` automatically
 
-mKCP traditionally runs with `security=none` and relies on `headerType=`/`seed=` camouflage instead of TLS (that's the whole point — looking like innocuous UDP traffic); leaving `security=tls` also works, just note the client defaults to `tls` when `security` isn't set at all, so pass `security=none` explicitly for the traditional setup.
+mKCP traditionally ran with `security=none`, relying on `headerType=`/`seed=` camouflage instead of TLS. Xray now allows that only for private server addresses (see [Unencrypted links](#more-tlsrealitytcp-parameters)), so use `security=tls` for a public server. The client defaults to `tls` when `security` isn't set.
 
 ### VLESS — dual route with load balancer
 
@@ -152,19 +154,19 @@ Salamander obfuscation (hides the QUIC handshake from DPI) and Brutal congestion
 ```
 
 - `obfs=salamander` + `obfs-password=<pwd>` (`obfs_password`/`obfsPassword` also accepted — some panels use those spellings) — must match the server's configuration
-- `obfs=gecko` is also accepted as an alias for `salamander` (some panels emit it as a distinct obfuscation mode with an extra padding-size range); this build's Salamander implementation only has a password, so it behaves identically to plain `salamander` here — the padding-range tuning some links attach to it has nothing to bind to
+- `obfs=gecko` is also accepted as an alias for `salamander` (some panels emit it as a distinct obfuscation mode with an extra padding-size range). Links carry no standard param for that range, so it behaves like plain `salamander`; to set the range, pass the mask via `fm=` with Salamander's `packetSize` (e.g. `{"udp":[{"type":"salamander","settings":{"password":"<pwd>","packetSize":"500-1200"}}]}`)
 - `up=`/`down=` — your own uplink/downlink caps in Mbps (a bare number), or a value with an explicit unit (e.g. `up=500kbps`); setting either enables Brutal congestion control by default
 - `congestion=` — override the congestion algorithm explicitly (`brutal`, `bbr`, `reno`, or `force-brutal`, which requires `up`); defaults to `brutal` when `up`/`down` is set, otherwise left to Xray's default
-- `mport=<port-or-range>` — enables UDP port hopping (e.g. `mport=20000-30000`)
+- `mport=<port-or-range>` — enables UDP port hopping (e.g. `mport=20000-30000`) via Xray's `udphop` mask, hopping every 5–10 s
 
-For anything beyond that (receive-window tuning, etc.), pass the raw Xray `finalmask` block as JSON via `fm=` (URL-encoded) — the same escape hatch as XHTTP's `extra=`, and the same `fm=` convention used by panels like 3x-ui. `fm=` is authoritative for whichever sub-blocks (`udp`, `quicParams`) it defines, so it takes priority over `obfs=`/`up=`/`down=`/`congestion=`/`mport=`:
+For anything beyond that (receive-window tuning, etc.), pass the raw Xray `finalmask` block as JSON via `fm=` (URL-encoded) — the same escape hatch as XHTTP's `extra=`, and the same `fm=` convention used by panels like 3x-ui:
 
 ```bash
-# fm={"quicParams":{"udpHop":{"ports":"20000-30000","interval":"5-10"}}}
-./vless-client -link "hysteria2://auth@host:443?fm=%7B%22quicParams%22%3A%7B%22udpHop%22%3A%7B%22ports%22%3A%2220000-30000%22%2C%22interval%22%3A%225-10%22%7D%7D%7D" -listen 127.0.0.1:1080
+# fm={"udp":[{"type":"udphop","settings":{"mode":"intervalLocal,intervalRemote","remotePorts":"20000-30000","interval":"5-10"}}]}
+./vless-client -link "hysteria2://auth@host:443?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalLocal%2CintervalRemote%22%2C%22remotePorts%22%3A%2220000-30000%22%2C%22interval%22%3A%225-10%22%7D%7D%5D%7D" -listen 127.0.0.1:1080
 ```
 
-`fm=` is authoritative for whichever sub-blocks (`udp`, `quicParams`) it defines; `obfs=`/`up=`/`down=`/`congestion=` only fill in the parts it leaves unset.
+`fm=` is authoritative for whichever sub-blocks (`udp`, `quicParams`) it defines; `obfs=`/`up=`/`down=`/`congestion=` only fill in the parts it leaves unset. `mport=` still adds a `udphop` mask (it must be the first UDP mask) unless `fm=` already has one. The old `quicParams.udpHop` form from older panels is converted to a `udphop` mask automatically.
 
 ### VLESS — dual route with local SOCKS5 upstream
 
