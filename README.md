@@ -324,6 +324,8 @@ routing rules, typically ending up in the proxy tunnel) — useful for hiding DN
 
 Plain DNS queries (UDP port 53) sent through the SOCKS5 proxy are answered by these same servers, whatever resolver address they were addressed to. This lets a tun2socks layer (e.g. hev-socks5-tunnel) forward the system resolver's queries as-is to any IP, including one that only exists inside the VPN. The HTTP proxy is unaffected, since it carries no UDP.
 
+`-dns-query-strategy` (or `dns_query_strategy`) sets Xray's `queryStrategy`: `UseIP` (Xray's default), `UseIPv4` or `UseIPv6`. It applies both to the client's own lookups and to those answered through the SOCKS5 proxy. With `UseIPv4`, AAAA queries get an empty reply, which keeps apps from connecting over IPv6 when the tunnel itself has no IPv6 (on Android, IPv6 traffic would then bypass the VPN).
+
 ### FakeDNS
 
 `-fakedns` (or `fakedns: true`) makes every DNS lookup return a synthetic IP instead of a real one — no

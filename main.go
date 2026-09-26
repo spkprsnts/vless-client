@@ -96,6 +96,7 @@ type FileConfig struct {
 	Listen         string `yaml:"listen"`
 	HTTP           string `yaml:"http"`
 	DNS            string `yaml:"dns"`
+	DNSQuery       string `yaml:"dns_query_strategy"`
 	LocalAddress   string `yaml:"local_address"`
 	DirectAddress  string `yaml:"direct_address"`
 	LocalSocks5    string `yaml:"local_socks5"`
@@ -133,7 +134,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -162,6 +163,7 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("listen", listen, fc.Listen)
 	str("http", httpSep, fc.HTTP)
 	str("dns", dnsServers, fc.DNS)
+	str("dns-query-strategy", dnsQueryStrategy, fc.DNSQuery)
 	str("local-address", localAddress, fc.LocalAddress)
 	str("direct-address", directAddress, fc.DirectAddress)
 	str("local-socks5", localSocks5, fc.LocalSocks5)
@@ -324,6 +326,33 @@ func withFakeDNS(dns []string, fakeDNS bool) []string {
 	return append([]string{"fakedns"}, dns...)
 }
 
+// buildDNS builds Xray's "dns" section. queryStrategy also applies to what dns-out answers:
+// with UseIPv4, AAAA queries get an empty NOERROR reply.
+func buildDNS(servers []string, queryStrategy string) map[string]any {
+	dns := map[string]any{"servers": servers}
+	if queryStrategy != "" {
+		dns["queryStrategy"] = queryStrategy
+	}
+	return dns
+}
+
+// normalizeQueryStrategy validates a -dns-query-strategy value and returns its canonical
+// spelling. Xray itself silently falls back to UseIP on anything it doesn't recognize, which
+// for a typo'd UseIPv4 would quietly hand out AAAA records again.
+func normalizeQueryStrategy(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return "", nil
+	case "useip":
+		return "UseIP", nil
+	case "useipv4":
+		return "UseIPv4", nil
+	case "useipv6":
+		return "UseIPv6", nil
+	}
+	return "", fmt.Errorf("invalid DNS query strategy %q (want UseIP, UseIPv4 or UseIPv6)", v)
+}
+
 // dnsHijack returns the "dns-out" outbound and the routing rule that sends DNS reaching the
 // SOCKS inbound to it, so queries forwarded as-is (e.g. by hev-socks5-tunnel, for the system
 // resolver's UDP/53 traffic) are answered by Xray's own resolver instead of being proxied to
@@ -343,7 +372,7 @@ func dnsHijack() (outbound, rule map[string]any) {
 }
 
 // Generate Xray configuration for WireGuard
-func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
+func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -397,9 +426,7 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
-		"dns": map[string]any{
-			"servers": dns,
-		},
+		"dns":   buildDNS(dns, dnsQueryStrategy),
 		"policy": map[string]any{
 			"system": map[string]any{
 				"statsOutboundUplink":   true,
@@ -1157,7 +1184,7 @@ func setDialerProxy(outbound map[string]any, tag string) {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock, hcDestination string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock, hcDestination string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1223,9 +1250,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
-		"dns": map[string]any{
-			"servers": finalDNS,
-		},
+		"dns":   buildDNS(finalDNS, dnsQueryStrategy),
 		"policy": map[string]any{
 			"system": map[string]any{
 				"statsOutboundUplink":   true,
@@ -1286,7 +1311,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 }
 
 // Generate Xray configuration for a standalone SOCKS5 upstream proxy
-func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
+func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1317,7 +1342,7 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 	configJSON := map[string]any{
 		"log":   map[string]any{"loglevel": logLevel, "access": logAccess},
 		"stats": map[string]any{},
-		"dns":   map[string]any{"servers": tcpDNS},
+		"dns":   buildDNS(tcpDNS, dnsQueryStrategy),
 		"policy": map[string]any{
 			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
 		},
@@ -1358,6 +1383,7 @@ func main() {
 	listen := flag.String("listen", "", "SOCKS5 proxy listen address ip:port (required)")
 	httpSep := flag.String("http", "", "HTTP proxy listen address ip:port (optional)")
 	dnsServers := flag.String("dns", "8.8.8.8,1.1.1.1", "Comma-separated DNS servers")
+	dnsQueryStrategy := flag.String("dns-query-strategy", "", "Xray DNS query strategy: UseIP, UseIPv4 or UseIPv6 (empty = Xray's default, UseIP). Also applies to DNS answered through the SOCKS5 proxy, e.g. UseIPv4 returns no AAAA records")
 	localAddress := flag.String("local-address", "", "Override proxy destination to this host:port (local/CDN route)")
 	directAddress := flag.String("direct-address", "", "Direct server host:port; enables load balancing between local and direct routes")
 	localSocks5 := flag.String("local-socks5", "", "Local SOCKS5 proxy ([user:pass@]host:port). Used as standalone upstream, or instead of the local route if -link and -direct-address are set")
@@ -1386,7 +1412,7 @@ func main() {
 	if fileCfg != nil {
 		applyFileConfig(fileCfg, setFlags,
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
-			listen, httpSep, dnsServers, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
+			listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
 			assetsPath, routeDirect, routeBlock, hcDestination,
 			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
@@ -1400,6 +1426,11 @@ func main() {
 		if err := os.Setenv("XRAY_LOCATION_ASSET", *assetsPath); err != nil {
 			log.Fatalf("Failed to set XRAY_LOCATION_ASSET: %v", err)
 		}
+	}
+
+	queryStrategy, err := normalizeQueryStrategy(*dnsQueryStrategy)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	var dnsList []string
@@ -1454,7 +1485,7 @@ func main() {
 			Endpoint:     *wgEndpoint,
 			KeepAlive:    *wgKeepAlive,
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from flags:", err)
 		}
@@ -1465,7 +1496,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to parse WireGuard config %s: %v", *wgConfigPath, err)
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
 		}
@@ -1568,7 +1599,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *hcDestination, *fakeDNS, *socks5Chain, chainDualRoute)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *hcDestination, *fakeDNS, *socks5Chain, chainDualRoute)
 		if err != nil {
 			log.Fatal("Failed to build Xray configuration:", err)
 		}
@@ -1579,7 +1610,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
 		}
-		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build SOCKS5 Xray configuration:", err)
 		}

@@ -16,6 +16,8 @@ http: ""                        # optional HTTP proxy listen address
 # (DoH3/DoQ), or "https+local://..."/"tcp+local://..." ("+local" resolves directly instead of
 # through routing/the tunnel). "localhost" uses the OS resolver.
 dns: "8.8.8.8,1.1.1.1"
+dns_query_strategy: ""          # UseIP, UseIPv4 or UseIPv6; empty = Xray's default (UseIP).
+                                 # UseIPv4 also returns no AAAA records to DNS sent through the proxy.
 fakedns: false                  # hand out synthetic IPs instead of resolving for real; the real
                                  # domain is recovered via sniffing for routing. Useful for
                                  # apps/protocols that resolve via IP before connecting.
