@@ -260,7 +260,7 @@ func buildInbounds(listenAddr, httpAddr, authUser, authPass string, fakeDNS bool
 	listenHost, listenPortStr, _ := net.SplitHostPort(listenAddr)
 	listenPort, _ := strconv.Atoi(listenPortStr)
 
-	destOverride := []string{"http", "tls"}
+	destOverride := []string{"http", "tls", "quic"}
 	if fakeDNS {
 		// Lets the dispatcher recover the real domain when a connection targets a
 		// fake IP handed out by the "fakedns" DNS server, so domain-based routing
