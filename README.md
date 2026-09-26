@@ -97,6 +97,12 @@ A few more link params for VLESS/Trojan, matching the short names Xray's own cod
 
 **Unencrypted links:** Xray refuses to start a VLESS/Trojan outbound with `security=none` when the server address is a public IP or domain. Only private IPs/domains are exempt, as is VLESS with post-quantum `encryption=` (anything other than `none`). Use `security=tls` or `security=reality` for servers on the public Internet.
 
+**TLS fragmentation:** `-fragment packets,length,delay` (or `fragment:` in YAML) splits the TLS ClientHello of every connection that goes straight to the server, so DPI can't read the SNI in one piece. It adds Xray's `fragment` finalmask TCP mask. Only `security=tls`/`reality` connections are affected; mKCP, Hysteria2 and WireGuard are UDP and are left alone. The same goes for hops to a loopback `-local-address` and connections chained through `-local-socks5`. A link that brings its own TCP masks via `fm=` keeps them. `length` and `delay` are ranges, `delay` in milliseconds:
+
+```bash
+./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com" -listen 127.0.0.1:1080 -fragment "tlshello,100-200,10-20"
+```
+
 ### mKCP
 
 A UDP-based transport that trades bandwidth efficiency for resilience on lossy links and, with a camouflage header, some protection against protocol fingerprinting. Works with VLESS/Trojan via `type=kcp` (or `mkcp`):
@@ -362,7 +368,9 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-wg-keepalive` | | Persistent keepalive in seconds (optional) |
 | `-http` | | Optional HTTP proxy address `ip:port` |
 | `-dns` | `8.8.8.8,1.1.1.1` | Comma-separated DNS servers — see [DNS](#dns) for supported schemes |
+| `-dns-query-strategy` | | `UseIP`, `UseIPv4` or `UseIPv6`; empty keeps Xray's default (`UseIP`). See [DNS](#dns) |
 | `-fakedns` | `false` | Hand out synthetic IPs instead of resolving for real; see [DNS](#dns) |
+| `-fragment` | | Split the TLS ClientHello of direct connections: `packets,length,delay` (e.g. `tlshello,100-200,10-20`); see [TLS fragmentation](#more-tlsrealitytcp-parameters) |
 | `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
 | `-hc-destination` | `http://connectivitycheck.gstatic.com/generate_204` | URL probed by the load balancer's health check (dual-route mode) |

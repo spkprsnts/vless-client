@@ -65,6 +65,9 @@ type ProxyConfig struct {
 	Address    string
 	Port       int
 	Params     map[string]string
+	// Fragment is the -fragment finalmask TCP mask, set only on configs that dial the real
+	// server directly (see main) - see applyFragment.
+	Fragment map[string]any
 }
 
 // WireGuard config structs
@@ -112,6 +115,7 @@ type FileConfig struct {
 	RouteDirect    string `yaml:"route_direct"`
 	RouteBlock     string `yaml:"route_block"`
 	FakeDNS        *bool  `yaml:"fakedns"`
+	Fragment       string `yaml:"fragment"`
 }
 
 // loadFileConfig reads and parses the YAML config at path. If the file is missing and
@@ -134,7 +138,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination, fragment *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -178,6 +182,7 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("route-direct", routeDirect, fc.RouteDirect)
 	str("route-block", routeBlock, fc.RouteBlock)
 	boolp("fakedns", fakeDNS, fc.FakeDNS)
+	str("fragment", fragment, fc.Fragment)
 	boolp("socks5-chain", socks5Chain, fc.Socks5Chain)
 }
 
@@ -334,6 +339,60 @@ func buildDNS(servers []string, queryStrategy string) map[string]any {
 		dns["queryStrategy"] = queryStrategy
 	}
 	return dns
+}
+
+// parseFragment turns -fragment's "packets,length,delay" into Xray's finalmask "fragment"
+// TCP mask (length and delay are ranges like "100-200", delay in ms).
+func parseFragment(v string) (map[string]any, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid -fragment %q (want packets,length,delay, e.g. tlshello,100-200,10-20)", v)
+	}
+	return map[string]any{
+		"type": "fragment",
+		"settings": map[string]any{
+			"packets": strings.TrimSpace(parts[0]),
+			"length":  strings.TrimSpace(parts[1]),
+			"delay":   strings.TrimSpace(parts[2]),
+		},
+	}, nil
+}
+
+// applyFragment adds cfg.Fragment as a finalmask TCP mask. Only TLS/REALITY connections have a
+// ClientHello to split, and mKCP runs over UDP. A link that brings its own TCP masks via fm=
+// keeps them as they are.
+func applyFragment(streamSettings map[string]any, cfg *ProxyConfig) {
+	if cfg.Fragment == nil {
+		return
+	}
+	if security := streamSettings["security"]; security != "tls" && security != "reality" {
+		return
+	}
+	if network, _ := streamSettings["network"].(string); network == "kcp" || network == "mkcp" {
+		return
+	}
+	fm, _ := streamSettings["finalmask"].(map[string]any)
+	if fm == nil {
+		fm = map[string]any{}
+		streamSettings["finalmask"] = fm
+	}
+	if tcp, _ := fm["tcp"].([]any); len(tcp) > 0 {
+		return
+	}
+	fm["tcp"] = []any{cfg.Fragment}
+}
+
+// isLocalHost reports whether host is a loopback/unspecified address, i.e. a local kernel's
+// listener (-local-address) rather than the real server.
+func isLocalHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // normalizeQueryStrategy validates a -dns-query-strategy value and returns its canonical
@@ -756,6 +815,7 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 			streamSettings["finalmask"] = fm
 		}
 	}
+	applyFragment(streamSettings, cfg)
 
 	var settings map[string]any
 	if cfg.Protocol == "trojan" {
@@ -1203,7 +1263,10 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 		// preferred by the balancer below; "local" is the same proxy config but chained through
 		// localSocks5 via dialerProxy, used as a fallback if the direct path is unreachable.
 		tags = []string{"local", "direct"}
-		localOutbound := buildOutbound(cfgs[0], "local", muxConcurrency)
+		// The chained route goes through the local SOCKS5 hop, which needs no fragmentation.
+		localCfg := *cfgs[0]
+		localCfg.Fragment = nil
+		localOutbound := buildOutbound(&localCfg, "local", muxConcurrency)
 		setDialerProxy(localOutbound, "socks5-chain-out")
 		outbounds = append(outbounds,
 			localOutbound,
@@ -1399,6 +1462,7 @@ func main() {
 	routeDirect := flag.String("route-direct", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) routed directly, bypassing the tunnel")
 	routeBlock := flag.String("route-block", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) that are blocked entirely")
 	fakeDNS := flag.Bool("fakedns", false, "Serve synthetic IPs for DNS lookups instead of resolving for real, recovering the domain via sniffing for routing (useful for apps/protocols that resolve via IP before connecting)")
+	fragment := flag.String("fragment", "", "Split the TLS ClientHello of direct connections to the server (security=tls/reality): packets,length,delay (e.g. tlshello,100-200,10-20); empty = off")
 	configPath := flag.String("config", "config.yaml", "Path to YAML config file (loaded if present; explicit CLI flags override its values)")
 	flag.Parse()
 
@@ -1413,7 +1477,7 @@ func main() {
 		applyFileConfig(fileCfg, setFlags,
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
-			assetsPath, routeDirect, routeBlock, hcDestination,
+			assetsPath, routeDirect, routeBlock, hcDestination, fragment,
 			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
 	}
@@ -1431,6 +1495,13 @@ func main() {
 	queryStrategy, err := normalizeQueryStrategy(*dnsQueryStrategy)
 	if err != nil {
 		log.Fatal(err)
+	}
+	fragmentMask, err := parseFragment(*fragment)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if fragmentMask != nil && *link == "" {
+		log.Println("warning: -fragment only applies to -link (vless/trojan) and will be ignored")
 	}
 
 	var dnsList []string
@@ -1596,6 +1667,16 @@ func main() {
 				log.Printf("Using %s with load balancer: local route %s:%d, direct route %s:%d", cfg.Protocol, cfg.Address, cfg.Port, host, port)
 			} else {
 				log.Printf("Using %s config from link", cfg.Protocol)
+			}
+		}
+
+		// Only connections that go straight onto the network: not the kernel's own local
+		// address (-local-address), and not a hop chained through -local-socks5.
+		if fragmentMask != nil && !(*socks5Chain && !chainDualRoute) {
+			for _, c := range cfgs {
+				if !isLocalHost(c.Address) {
+					c.Fragment = fragmentMask
+				}
 			}
 		}
 

@@ -21,6 +21,8 @@ dns_query_strategy: ""          # UseIP, UseIPv4 or UseIPv6; empty = Xray's defa
 fakedns: false                  # hand out synthetic IPs instead of resolving for real; the real
                                  # domain is recovered via sniffing for routing. Useful for
                                  # apps/protocols that resolve via IP before connecting.
+fragment: ""                    # split the TLS ClientHello of direct connections to the server:
+                                 # "packets,length,delay", e.g. "tlshello,100-200,10-20"; empty = off
 debug: false                    # verbose xray-core logging
 stats_socket: ""                # abstract unix socket name for stats (Linux/Android)
 proxy_user: ""                  # SOCKS5/HTTP inbound auth (optional)
