@@ -322,6 +322,8 @@ routing rules, typically ending up in the proxy tunnel) — useful for hiding DN
 ./vless-client -link "vless://..." -listen 127.0.0.1:1080 -dns "https://1.1.1.1/dns-query,tcp+local://8.8.8.8"
 ```
 
+Plain DNS queries (UDP port 53) sent through the SOCKS5 proxy are answered by these same servers, whatever resolver address they were addressed to. This lets a tun2socks layer (e.g. hev-socks5-tunnel) forward the system resolver's queries as-is to any IP, including one that only exists inside the VPN. The HTTP proxy is unaffected, since it carries no UDP.
+
 ### FakeDNS
 
 `-fakedns` (or `fakedns: true`) makes every DNS lookup return a synthetic IP instead of a real one — no

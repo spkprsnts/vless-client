@@ -277,6 +277,7 @@ func buildInbounds(listenAddr, httpAddr, authUser, authPass string, fakeDNS bool
 	}
 
 	inbounds = append(inbounds, map[string]any{
+		"tag":      "socks-in",
 		"listen":   listenHost,
 		"port":     listenPort,
 		"protocol": "socks",
@@ -323,6 +324,24 @@ func withFakeDNS(dns []string, fakeDNS bool) []string {
 	return append([]string{"fakedns"}, dns...)
 }
 
+// dnsHijack returns the "dns-out" outbound and the routing rule that sends DNS reaching the
+// SOCKS inbound to it, so queries forwarded as-is (e.g. by hev-socks5-tunnel, for the system
+// resolver's UDP/53 traffic) are answered by Xray's own resolver instead of being proxied to
+// whatever resolver IP the device was configured with. The rule is limited to "socks-in":
+// Xray's own queries to plain-UDP DNS servers also pass through routing and would otherwise
+// loop back into dns-out.
+func dnsHijack() (outbound, rule map[string]any) {
+	outbound = map[string]any{"tag": "dns-out", "protocol": "dns"}
+	rule = map[string]any{
+		"type":        "field",
+		"inboundTag":  []string{"socks-in"},
+		"network":     "udp",
+		"port":        53,
+		"outboundTag": "dns-out",
+	}
+	return outbound, rule
+}
+
 // Generate Xray configuration for WireGuard
 func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
 	logLevel := "error"
@@ -356,16 +375,19 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 		wgSettings["mtu"] = iface.MTU
 	}
 
+	dnsOut, dnsRule := dnsHijack()
 	outbounds := []any{
 		map[string]any{
 			"tag":      "proxy",
 			"protocol": "wireguard",
 			"settings": wgSettings,
 		},
+		dnsOut,
 	}
 	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
 	outbounds = append(outbounds, geoOutbounds...)
-	routingRules := append(geoRules, map[string]any{
+	routingRules := append([]any{dnsRule}, geoRules...)
+	routingRules = append(routingRules, map[string]any{
 		"type":        "field",
 		"network":     "tcp,udp",
 		"outboundTag": "proxy",
@@ -1190,9 +1212,10 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 			tcpDNS = append(tcpDNS, "tcp://"+d)
 		}
 		finalDNS = tcpDNS
-		outbounds = append(outbounds, map[string]any{"tag": "dns-out", "protocol": "dns"})
 	}
 	finalDNS = withFakeDNS(finalDNS, fakeDNS)
+	dnsOut, dnsRule := dnsHijack()
+	outbounds = append(outbounds, dnsOut)
 
 	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
 	outbounds = append(outbounds, geoOutbounds...)
@@ -1213,16 +1236,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 		"outbounds": outbounds,
 	}
 
-	var routingRules []any
-	if localSocks5 != "" && !socks5Chain {
-		routingRules = append(routingRules, map[string]any{
-			"type":        "field",
-			"network":     "udp",
-			"port":        53,
-			"outboundTag": "dns-out",
-		})
-	}
-	routingRules = append(routingRules, geoRules...)
+	routingRules := append([]any{dnsRule}, geoRules...)
 
 	// Add load balancer with health-check-based selection when two configs are provided.
 	if len(tags) > 1 {
@@ -1290,16 +1304,14 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 	}
 	tcpDNS = withFakeDNS(tcpDNS, fakeDNS)
 
+	dnsOut, dnsRule := dnsHijack()
 	outbounds := []any{
 		buildSocks5Outbound("proxy", localSocks5, localSocks5User, localSocks5Pass),
-		map[string]any{"tag": "dns-out", "protocol": "dns"},
+		dnsOut,
 	}
 	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
 	outbounds = append(outbounds, geoOutbounds...)
-	routingRules := []any{
-		map[string]any{"type": "field", "network": "udp", "port": 53, "outboundTag": "dns-out"},
-	}
-	routingRules = append(routingRules, geoRules...)
+	routingRules := append([]any{dnsRule}, geoRules...)
 	routingRules = append(routingRules, map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"})
 
 	configJSON := map[string]any{
