@@ -79,6 +79,6 @@ route_block: ""                 # e.g. "geosite:category-ads-all" — dropped en
 # traffic goes through the tunnel like everything else. QUIC (UDP 443) for route_dpi is blocked
 # so clients fall back to TCP. Empty dpi_socks = off.
 dpi_socks: ""                   # host:port, e.g. "127.0.0.1:1081"
-route_dpi: ""                   # same syntax as route_direct; empty = built-in YouTube domain list
+route_dpi: ""                   # same syntax as route_direct; empty = built-in YouTube and Discord domain list
 dpi_check: "https://www.youtube.com/generate_204"  # must be a site outside mobile whitelists
 dpi_check_interval: 30          # seconds

@@ -1132,9 +1132,10 @@ const (
 	dpiQUICRuleTag = "dpi-route-quic"
 )
 
-// defaultRouteDPI is what -dpi-socks routes when -route-dpi is empty: YouTube, as plain domains
+// defaultRouteDPI is what -dpi-socks routes when -route-dpi is empty: YouTube and Discord, as plain domains
 // so it works without geosite.dat.
-const defaultRouteDPI = "domain:youtube.com,domain:youtu.be,domain:googlevideo.com,domain:ytimg.com,domain:ggpht.com,domain:youtube-nocookie.com,domain:youtubei.googleapis.com"
+const defaultRouteDPI = "domain:youtube.com,domain:youtu.be,domain:googlevideo.com,domain:ytimg.com,domain:ggpht.com,domain:youtube-nocookie.com,domain:youtubei.googleapis.com," +
+	"domain:discord.com,domain:discord.gg,domain:discord.media,domain:discordapp.com,domain:discordapp.net,domain:discordcdn.com,domain:discord.co,domain:discord.dev,domain:discord.gift,domain:discord.new,domain:discordstatus.com,domain:dis.gd"
 
 // buildGeoRouting builds the optional freedom ("bypass-out") and blackhole ("block-out") outbounds
 // plus their routing rules for -route-direct/-route-block, and with dpiSocks set, the SOCKS5
@@ -1622,7 +1623,7 @@ func main() {
 	routeDirect := flag.String("route-direct", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) routed directly, bypassing the tunnel")
 	routeBlock := flag.String("route-block", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) that are blocked entirely")
 	dpiSocks := flag.String("dpi-socks", "", "Local SOCKS5 DPI-bypass proxy host:port (e.g. ByeDPI) that -route-dpi traffic is sent through while it can reach -dpi-check; otherwise that traffic goes through the tunnel. Empty = off")
-	routeDPI := flag.String("route-dpi", "", "Comma-separated match entries (same syntax as -route-direct) sent through -dpi-socks; empty = built-in YouTube domain list")
+	routeDPI := flag.String("route-dpi", "", "Comma-separated match entries (same syntax as -route-direct) sent through -dpi-socks; empty = built-in YouTube and Discord domain list")
 	dpiCheck := flag.String("dpi-check", "https://www.youtube.com/generate_204", "URL fetched through -dpi-socks to tell whether the DPI-bypass path works; must be a site outside mobile whitelists")
 	dpiCheckInterval := flag.Int("dpi-check-interval", 30, "Seconds between -dpi-check probes")
 	fakeDNS := flag.Bool("fakedns", false, "Serve synthetic IPs for DNS lookups instead of resolving for real, recovering the domain via sniffing for routing (useful for apps/protocols that resolve via IP before connecting)")
@@ -1682,7 +1683,7 @@ func main() {
 		routeDPIList = *routeDPI
 		label := routeDPIList
 		if domains, ips := parseRouteSpec(routeDPIList); len(domains) == 0 && len(ips) == 0 {
-			routeDPIList, label = defaultRouteDPI, "YouTube (built-in list)"
+			routeDPIList, label = defaultRouteDPI, "YouTube, Discord (built-in list)"
 		}
 		log.Printf("DPI route: %s for %s (check %s every %ds)", dpiSocksAddr, label, *dpiCheck, *dpiCheckInterval)
 	} else if *routeDPI != "" {

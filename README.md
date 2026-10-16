@@ -307,7 +307,7 @@ automatically switches to `IPIfNonMatch` so domains get resolved for IP matching
 ### DPI bypass route
 
 `-dpi-socks host:port` (or `dpi_socks`) sends the entries in `-route-dpi` (`route_dpi`, same syntax as
-above; empty = a built-in YouTube domain list) through a local SOCKS5 DPI-bypass proxy such as
+above; empty = a built-in list of YouTube and Discord domains) through a local SOCKS5 DPI-bypass proxy such as
 [ByeDPI](https://github.com/hufrea/byedpi) instead of the tunnel. Everything else still goes through the
 tunnel. QUIC (UDP 443) to those entries is blocked, so clients fall back to TCP through the bypass.
 
@@ -401,7 +401,7 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-route-direct` | | Comma-separated match entries (`geosite:name`, `geoip:name`, plain domain, or CIDR) routed directly, bypassing the tunnel |
 | `-route-block` | | Comma-separated match entries (same syntax) that are dropped entirely |
 | `-dpi-socks` | | Local SOCKS5 DPI-bypass proxy `host:port` (e.g. ByeDPI); see [DPI bypass route](#dpi-bypass-route) |
-| `-route-dpi` | *(YouTube)* | Comma-separated match entries (same syntax) sent through `-dpi-socks`; ignored without it |
+| `-route-dpi` | *(YouTube, Discord)* | Comma-separated match entries (same syntax) sent through `-dpi-socks`; ignored without it |
 | `-dpi-check` | `https://www.youtube.com/generate_204` | URL fetched through `-dpi-socks` to check that the bypass path works |
 | `-dpi-check-interval` | `30` | Seconds between `-dpi-check` probes |
 | `-debug` | `false` | Enable xray-core debug logging |
