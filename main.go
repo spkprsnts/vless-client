@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"maps"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -20,8 +24,11 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/xtls/xray-core/app/observatory"
+	"github.com/xtls/xray-core/app/router"
+	xserial "github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/extension"
+	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/infra/conf/serial"
 
 	// Blank imports for xray-core features.
@@ -114,6 +121,10 @@ type FileConfig struct {
 	AssetsPath     string `yaml:"assets_path"`
 	RouteDirect    string `yaml:"route_direct"`
 	RouteBlock     string `yaml:"route_block"`
+	DPISocks       string `yaml:"dpi_socks"`
+	RouteDPI       string `yaml:"route_dpi"`
+	DPICheck       string `yaml:"dpi_check"`
+	DPIInterval    *int   `yaml:"dpi_check_interval"`
 	FakeDNS        *bool  `yaml:"fakedns"`
 	Fragment       string `yaml:"fragment"`
 }
@@ -138,7 +149,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination, fragment *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency *int, debug, fakeDNS, socks5Chain *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination, fragment, dpiSocks, routeDPI, dpiCheck *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -181,6 +192,10 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	str("assets-path", assetsPath, fc.AssetsPath)
 	str("route-direct", routeDirect, fc.RouteDirect)
 	str("route-block", routeBlock, fc.RouteBlock)
+	str("dpi-socks", dpiSocks, fc.DPISocks)
+	str("route-dpi", routeDPI, fc.RouteDPI)
+	str("dpi-check", dpiCheck, fc.DPICheck)
+	intp("dpi-check-interval", dpiCheckInterval, fc.DPIInterval)
 	boolp("fakedns", fakeDNS, fc.FakeDNS)
 	str("fragment", fragment, fc.Fragment)
 	boolp("socks5-chain", socks5Chain, fc.Socks5Chain)
@@ -431,7 +446,7 @@ func dnsHijack() (outbound, rule map[string]any) {
 }
 
 // Generate Xray configuration for WireGuard
-func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
+func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPeerConfig, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock, dpiSocks, routeDPI string, fakeDNS bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -472,7 +487,7 @@ func buildWireGuardXrayConfig(iface *WireGuardInterfaceConfig, peer *WireGuardPe
 		},
 		dnsOut,
 	}
-	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
+	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock, dpiSocks, routeDPI)
 	outbounds = append(outbounds, geoOutbounds...)
 	routingRules := append([]any{dnsRule}, geoRules...)
 	routingRules = append(routingRules, map[string]any{
@@ -1108,11 +1123,26 @@ func parseRouteSpec(spec string) (domains []string, ips []string) {
 	return domains, ips
 }
 
+// Tags for the -dpi-socks route. Like "bypass-out" below, the outbound tag must not start with
+// "direct", "local" or "proxy" (balancer selectors match by prefix). The rules carry a ruleTag
+// so watchDPIRoute can drop them from the live router while the DPI path is unreachable.
+const (
+	dpiOutboundTag = "dpi-out"
+	dpiRuleTag     = "dpi-route"
+	dpiQUICRuleTag = "dpi-route-quic"
+)
+
+// defaultRouteDPI is what -dpi-socks routes when -route-dpi is empty: YouTube, as plain domains
+// so it works without geosite.dat.
+const defaultRouteDPI = "domain:youtube.com,domain:youtu.be,domain:googlevideo.com,domain:ytimg.com,domain:ggpht.com,domain:youtube-nocookie.com,domain:youtubei.googleapis.com"
+
 // buildGeoRouting builds the optional freedom ("bypass-out") and blackhole ("block-out") outbounds
-// plus their routing rules for -route-direct/-route-block. Block rules are returned before direct
-// rules so a blocked entry wins even when it also falls under a broader directly-routed category.
-// The returned domainStrategy is "IPIfNonMatch" if any "ip" rule was produced (domains are only
-// resolved to IP for geoip matching when that's needed), otherwise "AsIs".
+// plus their routing rules for -route-direct/-route-block, and with dpiSocks set, the SOCKS5
+// outbound ("dpi-out") and rules for -route-dpi. Block rules are returned first so a blocked entry
+// wins even when it also falls under a broader routed category, then the DPI rules (UDP 443 to
+// block-out, so QUIC can't slip past the DPI bypass and clients fall back to TCP, then the rest to
+// dpi-out), then direct rules. The returned domainStrategy is "IPIfNonMatch" if any "ip" rule was
+// produced (domains are only resolved to IP for geoip matching when that's needed), otherwise "AsIs".
 //
 // The freedom outbound is deliberately NOT tagged "direct-out": Xray's balancer selector
 // matching is prefix-based (strings.HasPrefix, see app/proxyman/outbound.Manager.Select), so a
@@ -1121,17 +1151,17 @@ func parseRouteSpec(spec string) (domains []string, ips []string) {
 // Since a raw connection almost always pings faster than one through the tunnel, leastping would
 // then route ALL general traffic (not just -route-direct's own explicit rule) through it —
 // silently bypassing the tunnel entirely. "bypass-out" shares no prefix with "direct"/"local".
-func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []any, domainStrategy string) {
+func buildGeoRouting(routeDirect, routeBlock, dpiSocks, routeDPI string) (outbounds []any, rules []any, domainStrategy string) {
 	domainStrategy = "AsIs"
-	add := func(spec, tag, protocol string) {
+	match := func(spec string) map[string]any {
 		if spec == "" {
-			return
+			return nil
 		}
 		domains, ips := parseRouteSpec(spec)
 		if len(domains) == 0 && len(ips) == 0 {
-			return
+			return nil
 		}
-		rule := map[string]any{"type": "field", "outboundTag": tag}
+		rule := map[string]any{"type": "field"}
 		if len(domains) > 0 {
 			rule["domain"] = domains
 		}
@@ -1141,11 +1171,40 @@ func buildGeoRouting(routeDirect, routeBlock string) (outbounds []any, rules []a
 			// switch away from the AsIs default when a rule actually has one.
 			domainStrategy = "IPIfNonMatch"
 		}
-		rules = append(rules, rule)
-		outbounds = append(outbounds, map[string]any{"tag": tag, "protocol": protocol, "settings": map[string]any{}})
+		return rule
 	}
-	add(routeBlock, "block-out", "blackhole")
-	add(routeDirect, "bypass-out", "freedom")
+	simple := func(tag, protocol string) map[string]any {
+		return map[string]any{"tag": tag, "protocol": protocol, "settings": map[string]any{}}
+	}
+
+	hasBlockOut := false
+	if rule := match(routeBlock); rule != nil {
+		rule["outboundTag"] = "block-out"
+		rules = append(rules, rule)
+		outbounds = append(outbounds, simple("block-out", "blackhole"))
+		hasBlockOut = true
+	}
+	if dpiSocks != "" {
+		if rule := match(routeDPI); rule != nil {
+			quic := maps.Clone(rule)
+			quic["network"] = "udp"
+			quic["port"] = 443
+			quic["outboundTag"] = "block-out"
+			quic["ruleTag"] = dpiQUICRuleTag
+			rule["outboundTag"] = dpiOutboundTag
+			rule["ruleTag"] = dpiRuleTag
+			rules = append(rules, quic, rule)
+			if !hasBlockOut {
+				outbounds = append(outbounds, simple("block-out", "blackhole"))
+			}
+			outbounds = append(outbounds, buildSocks5Outbound(dpiOutboundTag, dpiSocks, "", ""))
+		}
+	}
+	if rule := match(routeDirect); rule != nil {
+		rule["outboundTag"] = "bypass-out"
+		rules = append(rules, rule)
+		outbounds = append(outbounds, simple("bypass-out", "freedom"))
+	}
 	return outbounds, rules, domainStrategy
 }
 
@@ -1244,7 +1303,7 @@ func setDialerProxy(outbound map[string]any, tag string) {
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
-func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock, hcDestination string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
+func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, hcInterval, muxConcurrency int, authUser, authPass, routeDirect, routeBlock, dpiSocks, routeDPI, hcDestination string, fakeDNS, socks5Chain, chainDualRoute bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1307,7 +1366,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 	dnsOut, dnsRule := dnsHijack()
 	outbounds = append(outbounds, dnsOut)
 
-	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
+	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock, dpiSocks, routeDPI)
 	outbounds = append(outbounds, geoOutbounds...)
 
 	configJSON := map[string]any{
@@ -1374,7 +1433,7 @@ func buildXrayConfig(cfgs []*ProxyConfig, localSocks5, localSocks5User, localSoc
 }
 
 // Generate Xray configuration for a standalone SOCKS5 upstream proxy
-func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock string, fakeDNS bool) ([]byte, error) {
+func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listenAddr, httpAddr string, dns []string, dnsQueryStrategy string, debug bool, authUser, authPass, routeDirect, routeBlock, dpiSocks, routeDPI string, fakeDNS bool) ([]byte, error) {
 	logLevel := "error"
 	logAccess := "none"
 	if debug {
@@ -1397,7 +1456,7 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 		buildSocks5Outbound("proxy", localSocks5, localSocks5User, localSocks5Pass),
 		dnsOut,
 	}
-	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock)
+	geoOutbounds, geoRules, domainStrategy := buildGeoRouting(routeDirect, routeBlock, dpiSocks, routeDPI)
 	outbounds = append(outbounds, geoOutbounds...)
 	routingRules := append([]any{dnsRule}, geoRules...)
 	routingRules = append(routingRules, map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"})
@@ -1417,6 +1476,107 @@ func buildSocks5XrayConfig(localSocks5, localSocks5User, localSocks5Pass, listen
 		},
 	}
 	return json.MarshalIndent(configJSON, "", "  ")
+}
+
+// dpiRouterConfigs returns the routing config Xray was started with (the -route-dpi rules in
+// place) and a copy without those rules, for watchDPIRoute to switch between.
+func dpiRouterConfigs(config *core.Config) (on, off *xserial.TypedMessage, err error) {
+	for _, app := range config.App {
+		inst, err := app.GetInstance()
+		if err != nil {
+			return nil, nil, err
+		}
+		rc, ok := inst.(*router.Config)
+		if !ok {
+			continue
+		}
+		without := &router.Config{DomainStrategy: rc.DomainStrategy, BalancingRule: rc.BalancingRule}
+		for _, rule := range rc.Rule {
+			if rule.RuleTag != dpiRuleTag && rule.RuleTag != dpiQUICRuleTag {
+				without.Rule = append(without.Rule, rule)
+			}
+		}
+		return app, xserial.ToTypedMessage(without), nil
+	}
+	return nil, nil, errors.New("no routing config")
+}
+
+// probeDPI fetches checkURL through client and reports why it failed, if it did. Any 2xx/3xx
+// response counts: for an https URL it means the TLS handshake with the real site went through.
+func probeDPI(client *http.Client, checkURL string) error {
+	resp, err := client.Get(checkURL)
+	if err != nil {
+		// Drop the `Get "<url>":` prefix, the URL is already in the startup log line.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return ue.Err
+		}
+		return err
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// watchDPIRoute probes checkURL through the -dpi-socks proxy every interval and keeps the
+// -route-dpi rules in the live router only while the probe succeeds. Without them that traffic
+// falls through to the default rule (the tunnel or the dual-route balancer), e.g. on whitelisted
+// mobile networks where the site can't be reached directly at all. The router swaps its whole rule
+// set atomically, so Xray keeps running and connections already open on either path are left alone.
+// Xray starts with the rules in place; failThreshold consecutive failures take them out, and one
+// success puts them back.
+func watchDPIRoute(r routing.Router, socksAddr, checkURL string, interval time.Duration, on, off *xserial.TypedMessage) {
+	const (
+		failThreshold = 2
+		retryDelay    = 5 * time.Second // recheck sooner after a first failure
+	)
+	client := &http.Client{
+		Transport: &http.Transport{
+			// socks5: the proxy resolves the host itself, like it would for Xray's dpi-out.
+			Proxy: http.ProxyURL(&url.URL{Scheme: "socks5", Host: socksAddr}),
+			// A fresh connection per probe, so it tests the path rather than an idle socket.
+			DisableKeepAlives: true,
+		},
+		Timeout:       5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	active, reported, fails := true, false, 0
+	for {
+		err := probeDPI(client, checkURL)
+		wait, want := interval, active
+		if err == nil {
+			fails, want = 0, true
+		} else if fails++; fails >= failThreshold {
+			want = false
+		} else {
+			wait = retryDelay
+		}
+
+		if want != active {
+			cfg := off
+			if want {
+				cfg = on
+			}
+			if rerr := r.AddRule(cfg, false); rerr != nil {
+				log.Printf("DPI route: failed to update routing: %v", rerr)
+			} else {
+				active, reported = want, false
+			}
+		}
+		if !reported && want == active && (err == nil || fails >= failThreshold) {
+			if active {
+				log.Println("DPI route: available, routing via DPI bypass")
+			} else {
+				log.Printf("DPI route: unavailable (%v), routing through the tunnel", err)
+			}
+			reported = true
+		}
+		time.Sleep(wait)
+	}
 }
 
 // parseHostPort splits addr into a host and numeric port, exiting with a fatal error that
@@ -1461,6 +1621,10 @@ func main() {
 	assetsPath := flag.String("assets-path", "", "Directory containing geoip.dat/geosite.dat, required for geosite:/geoip: entries in -route-direct/-route-block (sets XRAY_LOCATION_ASSET)")
 	routeDirect := flag.String("route-direct", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) routed directly, bypassing the tunnel")
 	routeBlock := flag.String("route-block", "", "Comma-separated match entries (geosite:name, geoip:name, plain domain, or CIDR) that are blocked entirely")
+	dpiSocks := flag.String("dpi-socks", "", "Local SOCKS5 DPI-bypass proxy host:port (e.g. ByeDPI) that -route-dpi traffic is sent through while it can reach -dpi-check; otherwise that traffic goes through the tunnel. Empty = off")
+	routeDPI := flag.String("route-dpi", "", "Comma-separated match entries (same syntax as -route-direct) sent through -dpi-socks; empty = built-in YouTube domain list")
+	dpiCheck := flag.String("dpi-check", "https://www.youtube.com/generate_204", "URL fetched through -dpi-socks to tell whether the DPI-bypass path works; must be a site outside mobile whitelists")
+	dpiCheckInterval := flag.Int("dpi-check-interval", 30, "Seconds between -dpi-check probes")
 	fakeDNS := flag.Bool("fakedns", false, "Serve synthetic IPs for DNS lookups instead of resolving for real, recovering the domain via sniffing for routing (useful for apps/protocols that resolve via IP before connecting)")
 	fragment := flag.String("fragment", "", "Split the TLS ClientHello of direct connections to the server (security=tls/reality): packets,length,delay (e.g. tlshello,100-200,10-20); empty = off")
 	configPath := flag.String("config", "config.yaml", "Path to YAML config file (loaded if present; explicit CLI flags override its values)")
@@ -1477,8 +1641,8 @@ func main() {
 		applyFileConfig(fileCfg, setFlags,
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
-			assetsPath, routeDirect, routeBlock, hcDestination, fragment,
-			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, debug, fakeDNS, socks5Chain)
+			assetsPath, routeDirect, routeBlock, hcDestination, fragment, dpiSocks, routeDPI, dpiCheck,
+			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
 	}
 
@@ -1502,6 +1666,27 @@ func main() {
 	}
 	if fragmentMask != nil && *link == "" {
 		log.Println("warning: -fragment only applies to -link (vless/trojan) and will be ignored")
+	}
+
+	// dpiSocksAddr stays empty (and the generated config unchanged) unless -dpi-socks is set.
+	var dpiSocksAddr, routeDPIList string
+	if *dpiSocks != "" {
+		parseHostPort("-dpi-socks", *dpiSocks)
+		if u, err := url.Parse(*dpiCheck); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			log.Fatalf("Invalid -dpi-check %q: want an http:// or https:// URL", *dpiCheck)
+		}
+		if *dpiCheckInterval <= 0 {
+			log.Fatalf("Invalid -dpi-check-interval %d: must be positive", *dpiCheckInterval)
+		}
+		dpiSocksAddr = *dpiSocks
+		routeDPIList = *routeDPI
+		label := routeDPIList
+		if domains, ips := parseRouteSpec(routeDPIList); len(domains) == 0 && len(ips) == 0 {
+			routeDPIList, label = defaultRouteDPI, "YouTube (built-in list)"
+		}
+		log.Printf("DPI route: %s for %s (check %s every %ds)", dpiSocksAddr, label, *dpiCheck, *dpiCheckInterval)
+	} else if *routeDPI != "" {
+		log.Println("warning: -route-dpi has no effect without -dpi-socks and will be ignored")
 	}
 
 	var dnsList []string
@@ -1556,7 +1741,7 @@ func main() {
 			Endpoint:     *wgEndpoint,
 			KeepAlive:    *wgKeepAlive,
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, dpiSocksAddr, routeDPIList, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from flags:", err)
 		}
@@ -1567,7 +1752,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to parse WireGuard config %s: %v", *wgConfigPath, err)
 		}
-		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildWireGuardXrayConfig(iface, peer, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, dpiSocksAddr, routeDPIList, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build WireGuard Xray configuration from file:", err)
 		}
@@ -1680,7 +1865,7 @@ func main() {
 			}
 		}
 
-		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *hcDestination, *fakeDNS, *socks5Chain, chainDualRoute)
+		jsonConfig, err = buildXrayConfig(cfgs, parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *hcInterval, *muxConcurrency, *proxyUser, *proxyPass, *routeDirect, *routeBlock, dpiSocksAddr, routeDPIList, *hcDestination, *fakeDNS, *socks5Chain, chainDualRoute)
 		if err != nil {
 			log.Fatal("Failed to build Xray configuration:", err)
 		}
@@ -1691,7 +1876,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid -local-socks5 %q: %v", *localSocks5, err)
 		}
-		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, *fakeDNS)
+		jsonConfig, err = buildSocks5XrayConfig(parsedLocalSocks5, localSocks5User, localSocks5Pass, *listen, *httpSep, dnsList, queryStrategy, *debug, *proxyUser, *proxyPass, *routeDirect, *routeBlock, dpiSocksAddr, routeDPIList, *fakeDNS)
 		if err != nil {
 			log.Fatal("Failed to build SOCKS5 Xray configuration:", err)
 		}
@@ -1778,6 +1963,19 @@ func main() {
 		}()
 	}
 
+	if dpiSocksAddr != "" {
+		on, off, err := dpiRouterConfigs(config)
+		if err != nil {
+			log.Fatal("DPI route: ", err)
+		}
+		r, ok := server.GetFeature(routing.RouterType()).(routing.Router)
+		if !ok {
+			log.Fatal("DPI route: Xray router is not available")
+		}
+		go watchDPIRoute(r, dpiSocksAddr, *dpiCheck, time.Duration(*dpiCheckInterval)*time.Second, on, off)
+	}
+
+	// dpi-out is left out on purpose: it never carries tunnel traffic.
 	outboundTags := []string{"proxy"}
 	if dualOutbound {
 		outboundTags = []string{"local", "direct"}

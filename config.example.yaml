@@ -73,3 +73,12 @@ socks5_chain: false
 assets_path: ""                 # directory containing geoip.dat/geosite.dat
 route_direct: ""                # e.g. "geosite:cn,geoip:cn,geoip:private" — bypass the tunnel
 route_block: ""                 # e.g. "geosite:category-ads-all" — dropped entirely
+
+# Send route_dpi through a local SOCKS5 DPI bypass (e.g. ByeDPI's ciadpi) instead of the tunnel,
+# while dpi_check is reachable through it; otherwise (e.g. on whitelisted mobile networks) that
+# traffic goes through the tunnel like everything else. QUIC (UDP 443) for route_dpi is blocked
+# so clients fall back to TCP. Empty dpi_socks = off.
+dpi_socks: ""                   # host:port, e.g. "127.0.0.1:1081"
+route_dpi: ""                   # same syntax as route_direct; empty = built-in YouTube domain list
+dpi_check: "https://www.youtube.com/generate_204"  # must be a site outside mobile whitelists
+dpi_check_interval: 30          # seconds

@@ -304,6 +304,26 @@ automatically switches to `IPIfNonMatch` so domains get resolved for IP matching
   -route-block "geosite:category-ads-all"
 ```
 
+### DPI bypass route
+
+`-dpi-socks host:port` (or `dpi_socks`) sends the entries in `-route-dpi` (`route_dpi`, same syntax as
+above; empty = a built-in YouTube domain list) through a local SOCKS5 DPI-bypass proxy such as
+[ByeDPI](https://github.com/hufrea/byedpi) instead of the tunnel. Everything else still goes through the
+tunnel. QUIC (UDP 443) to those entries is blocked, so clients fall back to TCP through the bypass.
+
+The bypass only helps while the device has regular internet access. Every `-dpi-check-interval` seconds
+(default `30`), vless-client fetches `-dpi-check` (default `https://www.youtube.com/generate_204`) through
+the SOCKS5 proxy. After two failures in a row, `-route-dpi` traffic goes through the tunnel like everything
+else (on whitelisted mobile networks, for example); after one success it goes back to the bypass. Switching
+only swaps Xray's routing rules: Xray keeps running and open connections are not dropped. `-dpi-check`
+must be a site outside such whitelists, so don't use `connectivitycheck.gstatic.com`.
+
+```bash
+./vless-client -link "vless://..." -listen 127.0.0.1:1080 \
+  -assets-path /etc/xray/assets \
+  -dpi-socks 127.0.0.1:1081 -route-dpi "geosite:youtube"
+```
+
 ## DNS
 
 `-dns` (or `dns` in the YAML config) is a comma-separated list of servers used for the client's own domain
@@ -380,6 +400,10 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-assets-path` | | Directory containing `geoip.dat`/`geosite.dat` (sets `XRAY_LOCATION_ASSET`); required for `geosite:`/`geoip:` entries below |
 | `-route-direct` | | Comma-separated match entries (`geosite:name`, `geoip:name`, plain domain, or CIDR) routed directly, bypassing the tunnel |
 | `-route-block` | | Comma-separated match entries (same syntax) that are dropped entirely |
+| `-dpi-socks` | | Local SOCKS5 DPI-bypass proxy `host:port` (e.g. ByeDPI); see [DPI bypass route](#dpi-bypass-route) |
+| `-route-dpi` | *(YouTube)* | Comma-separated match entries (same syntax) sent through `-dpi-socks`; ignored without it |
+| `-dpi-check` | `https://www.youtube.com/generate_204` | URL fetched through `-dpi-socks` to check that the bypass path works |
+| `-dpi-check-interval` | `30` | Seconds between `-dpi-check` probes |
 | `-debug` | `false` | Enable xray-core debug logging |
 
 > **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.
