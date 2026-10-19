@@ -367,11 +367,50 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 ./vless-client -link "vless://..." -listen 127.0.0.1:1080 -fakedns
 ```
 
+## Link latency test
+
+`-test-links <file>` (or `-` for stdin) checks a whole list of `vless://`, `trojan://` and `hysteria2://`/`hy2://`
+links in one process and exits, without opening any ports. For each link it starts a throwaway Xray instance
+with that link as its only outbound and times an HTTP request to `-test-url` through it. That's the "real
+delay" as in v2rayNG, not an ICMP ping of the server's IP.
+
+```bash
+printf 'vless://...\ntrojan://...\nbad-link\n' | ./vless-client -test-links -
+```
+
+stdout gets one JSON line per link as soon as its check is done, so lines come in completion order:
+
+```json
+{"index":1,"ms":214}
+{"index":0,"error":"timeout"}
+{"index":2,"error":"invalid link: unsupported link scheme (expected vless://, trojan://, hysteria2://, or hy2://)"}
+```
+
+- `index` is the link's 0-based line number in the input. Blank lines and lines starting with `#` are
+  skipped but still counted.
+- `ms` is the time from sending the request to receiving the response status. Any HTTP status counts,
+  and redirects aren't followed.
+- `error` is a short reason: `timeout`, `connection refused`, `tls: ...`, `invalid link: ...`, and so on.
+  A bad link gets an error line like any other failure.
+
+Logs go to stderr only. The exit code is 0 once every link is checked; it's non-zero only when the
+mode itself fails, for example when the file can't be opened. On SIGINT/SIGTERM, checks still running
+are dropped without output and the process exits.
+
+| Flag | Default | Description |
+|---|---|---|
+| `-test-url` | `http://connectivitycheck.gstatic.com/generate_204` | URL requested through each server |
+| `-test-timeout` | `5` | Timeout of one check in seconds (connecting plus the response) |
+| `-test-concurrency` | `8` | Number of checks run at once |
+
+`-dns`, `-dns-query-strategy`, `-fragment` and `-assets-path` apply here too. Every other mode, routing
+and proxy flag is ignored, and Mux is always off so it doesn't skew the first connection's time.
+
 ## Flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `-listen` | *(required)* | SOCKS5 proxy listen address `ip:port` |
+| `-listen` | *(required)* | SOCKS5 proxy listen address `ip:port` (not needed with `-test-links`) |
 | `-link` | | Proxy link: `vless://`, `trojan://`, or `hysteria2://` (`hy2://`) |
 | `-config` | `config.yaml` | Path to YAML config file (loaded if present; CLI flags override its values) |
 | `-local-address` | | Override link destination `host:port` (local/CDN route) |
@@ -404,6 +443,7 @@ round-trip and keeps the domain, not just an IP, visible to routing decisions in
 | `-route-dpi` | *(YouTube, Discord)* | Comma-separated match entries (same syntax) sent through `-dpi-socks`; ignored without it |
 | `-dpi-check` | `https://www.youtube.com/generate_204` | URL fetched through `-dpi-socks` to check that the bypass path works |
 | `-dpi-check-interval` | `30` | Seconds between `-dpi-check` probes |
+| `-test-links` | | Check the real delay of each link in this file (`-` = stdin) and exit; see [Link latency test](#link-latency-test) |
 | `-debug` | `false` | Enable xray-core debug logging |
 
 > **WireGuard config priority:** individual `-wg-*` flags override values from `-wg` config file.

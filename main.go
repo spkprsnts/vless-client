@@ -1580,6 +1580,38 @@ func watchDPIRoute(r routing.Router, socksAddr, checkURL string, interval time.D
 	}
 }
 
+// runTestLinksMode validates the -test-* flags, opens the -test-links input and runs
+// runLinkTests until it's done or SIGINT/SIGTERM arrives. Every other mode flag is ignored.
+func runTestLinksMode(path, testURL string, timeoutSec, concurrency int, opts linkTestOptions, debug bool) {
+	if u, err := url.Parse(testURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		log.Fatalf("Invalid -test-url %q: want an http:// or https:// URL", testURL)
+	}
+	if timeoutSec <= 0 {
+		log.Fatalf("Invalid -test-timeout %d: must be positive", timeoutSec)
+	}
+	if concurrency <= 0 {
+		log.Fatalf("Invalid -test-concurrency %d: must be positive", concurrency)
+	}
+	opts.url = testURL
+	opts.timeout = time.Duration(timeoutSec) * time.Second
+
+	input := io.Reader(os.Stdin)
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			log.Fatalf("Failed to open -test-links file: %v", err)
+		}
+		defer f.Close()
+		input = f
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := runLinkTests(ctx, input, concurrency, opts, debug); err != nil {
+		log.Fatal(err)
+	}
+}
+
 // parseHostPort splits addr into a host and numeric port, exiting with a fatal error that
 // names flagName if addr isn't a valid "host:port" or the port isn't numeric.
 func parseHostPort(flagName, addr string) (string, int) {
@@ -1628,6 +1660,10 @@ func main() {
 	dpiCheckInterval := flag.Int("dpi-check-interval", 30, "Seconds between -dpi-check probes")
 	fakeDNS := flag.Bool("fakedns", false, "Serve synthetic IPs for DNS lookups instead of resolving for real, recovering the domain via sniffing for routing (useful for apps/protocols that resolve via IP before connecting)")
 	fragment := flag.String("fragment", "", "Split the TLS ClientHello of direct connections to the server (security=tls/reality): packets,length,delay (e.g. tlshello,100-200,10-20); empty = off")
+	testLinks := flag.String("test-links", "", "Measure the real delay of each proxy link in this file (one per line, - for stdin), print one JSON line per link to stdout and exit")
+	testURL := flag.String("test-url", "http://connectivitycheck.gstatic.com/generate_204", "URL requested through each server by -test-links")
+	testTimeout := flag.Int("test-timeout", 5, "Timeout of one -test-links check in seconds")
+	testConcurrency := flag.Int("test-concurrency", 8, "Number of -test-links checks run at once")
 	configPath := flag.String("config", "config.yaml", "Path to YAML config file (loaded if present; explicit CLI flags override its values)")
 	flag.Parse()
 
@@ -1647,7 +1683,7 @@ func main() {
 		log.Printf("Loaded config file %s", *configPath)
 	}
 
-	if *listen == "" {
+	if *listen == "" && *testLinks == "" {
 		log.Fatal("-listen is required")
 	}
 
@@ -1665,8 +1701,24 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if fragmentMask != nil && *link == "" {
+	if fragmentMask != nil && *link == "" && *testLinks == "" {
 		log.Println("warning: -fragment only applies to -link (vless/trojan) and will be ignored")
+	}
+
+	var dnsList []string
+	for s := range strings.SplitSeq(*dnsServers, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			dnsList = append(dnsList, s)
+		}
+	}
+
+	if *testLinks != "" {
+		runTestLinksMode(*testLinks, *testURL, *testTimeout, *testConcurrency, linkTestOptions{
+			dns:           dnsList,
+			queryStrategy: queryStrategy,
+			fragment:      fragmentMask,
+		}, *debug)
+		return
 	}
 
 	// dpiSocksAddr stays empty (and the generated config unchanged) unless -dpi-socks is set.
@@ -1688,13 +1740,6 @@ func main() {
 		log.Printf("DPI route: %s for %s (check %s every %ds)", dpiSocksAddr, label, *dpiCheck, *dpiCheckInterval)
 	} else if *routeDPI != "" {
 		log.Println("warning: -route-dpi has no effect without -dpi-socks and will be ignored")
-	}
-
-	var dnsList []string
-	for s := range strings.SplitSeq(*dnsServers, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			dnsList = append(dnsList, s)
-		}
 	}
 
 	var parsedLocalSocks5, localSocks5User, localSocks5Pass string
