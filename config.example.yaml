@@ -23,6 +23,9 @@ fakedns: false                  # hand out synthetic IPs instead of resolving fo
                                  # apps/protocols that resolve via IP before connecting.
 fragment: ""                    # split the TLS ClientHello of direct connections to the server:
                                  # "packets,length,delay", e.g. "tlshello,100-200,10-20"; empty = off
+tcp_user_timeout: 30            # seconds without an ACK before a TCP connection to the server is
+                                 # dropped, so connections stranded by a network change fail fast;
+                                 # vless/trojan only, 0 = off
 debug: false                    # verbose xray-core logging
 stats_socket: ""                # abstract unix socket name for stats (Linux/Android)
 proxy_user: ""                  # SOCKS5/HTTP inbound auth (optional)

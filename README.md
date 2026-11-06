@@ -103,6 +103,8 @@ A few more link params for VLESS/Trojan, matching the short names Xray's own cod
 ./vless-client -link "vless://UUID@host:443?security=tls&sni=host.example.com" -listen 127.0.0.1:1080 -fragment "tlshello,100-200,10-20"
 ```
 
+**Dead-connection timeout:** `-tcp-user-timeout SECONDS` (default `30`, `0` = off; `tcp_user_timeout:` in YAML) sets `TCP_USER_TIMEOUT` on the TCP connections this client opens to the server (Xray's `sockopt.tcpUserTimeout`, plus TCP keepalive at 15s idle / 15s interval so an idle connection is checked too). When the network changes under a connection (Wi-Fi to mobile, a Wi-Fi without Internet) the old socket can silently keep sending into the void for ~15 minutes, and with `-mux` everything shares that one socket. With this option the connection is dropped after the timeout without an ACK and Xray redials. It applies to vless/trojan links (the `-direct-address` route and the `-socks5-chain` outbound too, which keeps its `dialerProxy`). Hysteria2 and mKCP are UDP, and loopback `-local-address` hops, `-route-direct` traffic and `-test-links` are left alone. Linux/Android only.
+
 ### mKCP
 
 A UDP-based transport that trades bandwidth efficiency for resilience on lossy links and, with a camouflage header, some protection against protocol fingerprinting. Works with VLESS/Trojan via `type=kcp` (or `mkcp`):
@@ -430,6 +432,7 @@ and proxy flag is ignored, and Mux is always off so it doesn't skew the first co
 | `-dns-query-strategy` | | `UseIP`, `UseIPv4` or `UseIPv6`; empty keeps Xray's default (`UseIP`). See [DNS](#dns) |
 | `-fakedns` | `false` | Hand out synthetic IPs instead of resolving for real; see [DNS](#dns) |
 | `-fragment` | | Split the TLS ClientHello of direct connections: `packets,length,delay` (e.g. `tlshello,100-200,10-20`); see [TLS fragmentation](#more-tlsrealitytcp-parameters) |
+| `-tcp-user-timeout` | `30` | Seconds without an ACK before a TCP connection to the server is dropped (`0` = off); see [Dead-connection timeout](#more-tlsrealitytcp-parameters) |
 | `-stats-socket` | | Abstract Unix socket name for stats/status/check (Android/Linux only) |
 | `-hc-interval` | `30` | Health check interval in seconds (dual-route mode) |
 | `-hc-destination` | `http://connectivitycheck.gstatic.com/generate_204` | URL probed by the load balancer's health check (dual-route mode) |

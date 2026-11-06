@@ -75,6 +75,9 @@ type ProxyConfig struct {
 	// Fragment is the -fragment finalmask TCP mask, set only on configs that dial the real
 	// server directly (see main) - see applyFragment.
 	Fragment map[string]any
+	// TCPUserTimeout is the -tcp-user-timeout in seconds, set only on configs whose TCP
+	// connection to the real server is dialed from this process (see main) - see applySockopt.
+	TCPUserTimeout int
 }
 
 // WireGuard config structs
@@ -127,6 +130,7 @@ type FileConfig struct {
 	DPIInterval    *int   `yaml:"dpi_check_interval"`
 	FakeDNS        *bool  `yaml:"fakedns"`
 	Fragment       string `yaml:"fragment"`
+	TCPUserTimeout *int   `yaml:"tcp_user_timeout"`
 }
 
 // loadFileConfig reads and parses the YAML config at path. If the file is missing and
@@ -149,7 +153,7 @@ func loadFileConfig(path string, explicit bool) (*FileConfig, error) {
 
 // applyFileConfig fills flag values from the file config, skipping any flag the user
 // explicitly set on the command line (those always win).
-func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination, fragment, dpiSocks, routeDPI, dpiCheck *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval *int, debug, fakeDNS, socks5Chain *bool) {
+func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress, listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass, assetsPath, routeDirect, routeBlock, hcDestination, fragment, dpiSocks, routeDPI, dpiCheck *string, wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval, tcpUserTimeout *int, debug, fakeDNS, socks5Chain *bool) {
 	str := func(name string, dst *string, src string) {
 		if !setFlags[name] && src != "" {
 			*dst = src
@@ -198,6 +202,7 @@ func applyFileConfig(fc *FileConfig, setFlags map[string]bool, link, wgConfigPat
 	intp("dpi-check-interval", dpiCheckInterval, fc.DPIInterval)
 	boolp("fakedns", fakeDNS, fc.FakeDNS)
 	str("fragment", fragment, fc.Fragment)
+	intp("tcp-user-timeout", tcpUserTimeout, fc.TCPUserTimeout)
 	boolp("socks5-chain", socks5Chain, fc.Socks5Chain)
 }
 
@@ -398,6 +403,32 @@ func applyFragment(streamSettings map[string]any, cfg *ProxyConfig) {
 		return
 	}
 	fm["tcp"] = []any{cfg.Fragment}
+}
+
+// tcpKeepAliveSeconds is the keepalive idle time and probe interval set alongside
+// TCP_USER_TIMEOUT. xray-core's dialer already enables keepalive, but at 45s/45s.
+const tcpKeepAliveSeconds = 15
+
+// applySockopt sets streamSettings.sockopt.tcpUserTimeout (Xray takes milliseconds) from
+// cfg.TCPUserTimeout, so a connection left on a dead network is dropped after that long
+// without an ACK instead of after the kernel's ~15 minutes of retransmits. Keepalive is
+// tightened too so an idle dead connection is found as well: TCP_USER_TIMEOUT also bounds
+// unanswered keepalive probes. mKCP runs over UDP and has no TCP socket to configure.
+func applySockopt(streamSettings map[string]any, cfg *ProxyConfig) {
+	if cfg.TCPUserTimeout <= 0 {
+		return
+	}
+	if network, _ := streamSettings["network"].(string); network == "kcp" || network == "mkcp" {
+		return
+	}
+	sockopt, _ := streamSettings["sockopt"].(map[string]any)
+	if sockopt == nil {
+		sockopt = map[string]any{}
+		streamSettings["sockopt"] = sockopt
+	}
+	sockopt["tcpUserTimeout"] = cfg.TCPUserTimeout * 1000
+	sockopt["tcpKeepAliveIdle"] = tcpKeepAliveSeconds
+	sockopt["tcpKeepAliveInterval"] = tcpKeepAliveSeconds
 }
 
 // isLocalHost reports whether host is a loopback/unspecified address, i.e. a local kernel's
@@ -831,6 +862,7 @@ func buildOutbound(cfg *ProxyConfig, tag string, muxConcurrency int) map[string]
 		}
 	}
 	applyFragment(streamSettings, cfg)
+	applySockopt(streamSettings, cfg)
 
 	var settings map[string]any
 	if cfg.Protocol == "trojan" {
@@ -1294,13 +1326,19 @@ func buildSocks5Outbound(tag, localSocks5, localSocks5User, localSocks5Pass stri
 
 // setDialerProxy points an outbound's streamSettings.sockopt.dialerProxy at tag, so its
 // underlying connection is dialed through that other tagged outbound instead of directly.
+// Other sockopt fields already set (e.g. tcpUserTimeout) are kept.
 func setDialerProxy(outbound map[string]any, tag string) {
 	streamSettings, _ := outbound["streamSettings"].(map[string]any)
 	if streamSettings == nil {
 		streamSettings = map[string]any{}
 		outbound["streamSettings"] = streamSettings
 	}
-	streamSettings["sockopt"] = map[string]any{"dialerProxy": tag}
+	sockopt, _ := streamSettings["sockopt"].(map[string]any)
+	if sockopt == nil {
+		sockopt = map[string]any{}
+		streamSettings["sockopt"] = sockopt
+	}
+	sockopt["dialerProxy"] = tag
 }
 
 // Generate Xray configuration. When len(cfgs) > 1, enables load balancing with health checks.
@@ -1660,6 +1698,7 @@ func main() {
 	dpiCheckInterval := flag.Int("dpi-check-interval", 30, "Seconds between -dpi-check probes")
 	fakeDNS := flag.Bool("fakedns", false, "Serve synthetic IPs for DNS lookups instead of resolving for real, recovering the domain via sniffing for routing (useful for apps/protocols that resolve via IP before connecting)")
 	fragment := flag.String("fragment", "", "Split the TLS ClientHello of direct connections to the server (security=tls/reality): packets,length,delay (e.g. tlshello,100-200,10-20); empty = off")
+	tcpUserTimeout := flag.Int("tcp-user-timeout", 30, "Seconds without an ACK after which a TCP connection to the server is dropped (TCP_USER_TIMEOUT), so connections left on a dead network fail fast; applies to vless/trojan links, 0 = off")
 	testLinks := flag.String("test-links", "", "Measure the real delay of each proxy link in this file (one per line, - for stdin), print one JSON line per link to stdout and exit")
 	testURL := flag.String("test-url", "http://connectivitycheck.gstatic.com/generate_204", "URL requested through each server by -test-links")
 	testTimeout := flag.Int("test-timeout", 5, "Timeout of one -test-links check in seconds")
@@ -1679,7 +1718,7 @@ func main() {
 			link, wgConfigPath, wgPrivateKey, wgPublicKey, wgPresharedKey, wgEndpoint, wgAddress,
 			listen, httpSep, dnsServers, dnsQueryStrategy, localAddress, directAddress, localSocks5, statsSocket, proxyUser, proxyPass,
 			assetsPath, routeDirect, routeBlock, hcDestination, fragment, dpiSocks, routeDPI, dpiCheck,
-			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval, debug, fakeDNS, socks5Chain)
+			wgMTU, wgKeepAlive, hcInterval, muxConcurrency, dpiCheckInterval, tcpUserTimeout, debug, fakeDNS, socks5Chain)
 		log.Printf("Loaded config file %s", *configPath)
 	}
 
@@ -1898,6 +1937,17 @@ func main() {
 				log.Printf("Using %s with load balancer: local route %s:%d, direct route %s:%d", cfg.Protocol, cfg.Address, cfg.Port, host, port)
 			} else {
 				log.Printf("Using %s config from link", cfg.Protocol)
+			}
+		}
+
+		if *tcpUserTimeout < 0 {
+			log.Fatalf("Invalid -tcp-user-timeout %d: must not be negative", *tcpUserTimeout)
+		}
+		// Same rule as -fragment below, minus the socks5-chain exclusion: the dialerProxy
+		// outbound still carries the setting alongside dialerProxy.
+		for _, c := range cfgs {
+			if !isLocalHost(c.Address) {
+				c.TCPUserTimeout = *tcpUserTimeout
 			}
 		}
 
