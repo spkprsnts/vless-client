@@ -295,7 +295,8 @@ official [v2fly](https://github.com/v2fly) builds — placed in a directory poin
 (or the `XRAY_LOCATION_ASSET` environment variable, which `-assets-path` sets for you). Plain domains/CIDRs
 don't need any data file.
 
-Block rules are checked before direct rules, so blocking a specific domain still works even if it also
+Entries in one list are alternatives: a connection matches if it hits *any* of them, domains and IPs mixed freely
+(`geosite:` and `geoip:` entries don't have to agree). Block rules are checked before direct rules, so blocking a specific domain still works even if it also
 falls under a category you're routing directly. When any `geoip:`/CIDR entry is used, `domainStrategy`
 automatically switches to `IPIfNonMatch` so domains get resolved for IP matching; otherwise it stays `AsIs`.
 

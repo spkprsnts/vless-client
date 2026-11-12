@@ -1132,6 +1132,8 @@ func buildKcpFinalMask(params map[string]string) map[string]any {
 // into the "domain" and "ip" arrays used by an Xray field routing rule. "geoip:" entries and literal
 // IPs/CIDRs go to ip[]; everything else (geosite:, domain:, full:, regexp:, keyword:, or a bare domain)
 // goes to domain[]. Requires geoip.dat/geosite.dat to be reachable via -assets-path (XRAY_LOCATION_ASSET).
+// The two arrays must not share one Xray rule: conditions inside a rule are ANDed, so a mixed
+// list would only match a domain whose IP is also in the ip list (see buildGeoRouting).
 func parseRouteSpec(spec string) (domains []string, ips []string) {
 	for entry := range strings.SplitSeq(spec, ",") {
 		entry = strings.TrimSpace(entry)
@@ -1162,7 +1164,20 @@ const (
 	dpiOutboundTag = "dpi-out"
 	dpiRuleTag     = "dpi-route"
 	dpiQUICRuleTag = "dpi-route-quic"
+	// Xray rejects a repeated non-empty ruleTag, so the ip half of a rule split by
+	// buildGeoRouting gets its own tag.
+	dpiIPRuleTag     = "dpi-route-ip"
+	dpiQUICIPRuleTag = "dpi-route-quic-ip"
 )
+
+// isDPIRuleTag reports whether tag belongs to a -route-dpi rule.
+func isDPIRuleTag(tag string) bool {
+	switch tag {
+	case dpiRuleTag, dpiQUICRuleTag, dpiIPRuleTag, dpiQUICIPRuleTag:
+		return true
+	}
+	return false
+}
 
 // defaultRouteDPI is what -dpi-socks routes when -route-dpi is empty: YouTube and Discord, as plain domains
 // so it works without geosite.dat.
@@ -1177,6 +1192,11 @@ const defaultRouteDPI = "domain:youtube.com,domain:youtu.be,domain:googlevideo.c
 // dpi-out), then direct rules. The returned domainStrategy is "IPIfNonMatch" if any "ip" rule was
 // produced (domains are only resolved to IP for geoip matching when that's needed), otherwise "AsIs".
 //
+// Entries of one list are alternatives (OR), but Xray ANDs the conditions inside a single rule: one
+// rule with both "domain" and "ip" would only match a sniffed domain whose IP is also in the ip list,
+// and never a bare-IP connection. So each list becomes up to two rules with the same outboundTag, one
+// with only "domain" and one with only "ip" (an empty half is omitted).
+//
 // The freedom outbound is deliberately NOT tagged "direct-out": Xray's balancer selector
 // matching is prefix-based (strings.HasPrefix, see app/proxyman/outbound.Manager.Select), so a
 // dual-route balancer selecting on "direct" (main.go's "direct" outbound tag) would also match
@@ -1186,56 +1206,72 @@ const defaultRouteDPI = "domain:youtube.com,domain:youtu.be,domain:googlevideo.c
 // silently bypassing the tunnel entirely. "bypass-out" shares no prefix with "direct"/"local".
 func buildGeoRouting(routeDirect, routeBlock, dpiSocks, routeDPI string) (outbounds []any, rules []any, domainStrategy string) {
 	domainStrategy = "AsIs"
-	match := func(spec string) map[string]any {
-		if spec == "" {
-			return nil
-		}
+	// match returns the domain rule and the ip rule for spec; either is nil when it has no entries.
+	match := func(spec string) (domainRule, ipRule map[string]any) {
 		domains, ips := parseRouteSpec(spec)
-		if len(domains) == 0 && len(ips) == 0 {
-			return nil
-		}
-		rule := map[string]any{"type": "field"}
 		if len(domains) > 0 {
-			rule["domain"] = domains
+			domainRule = map[string]any{"type": "field", "domain": domains}
 		}
 		if len(ips) > 0 {
-			rule["ip"] = ips
+			ipRule = map[string]any{"type": "field", "ip": ips}
 			// Domains only need resolving to check them against an "ip" rule, so only
 			// switch away from the AsIs default when a rule actually has one.
 			domainStrategy = "IPIfNonMatch"
 		}
-		return rule
+		return domainRule, ipRule
 	}
 	simple := func(tag, protocol string) map[string]any {
 		return map[string]any{"tag": tag, "protocol": protocol, "settings": map[string]any{}}
 	}
 
 	hasBlockOut := false
-	if rule := match(routeBlock); rule != nil {
-		rule["outboundTag"] = "block-out"
-		rules = append(rules, rule)
+	if d, ip := match(routeBlock); d != nil || ip != nil {
+		for _, rule := range []map[string]any{d, ip} {
+			if rule != nil {
+				rule["outboundTag"] = "block-out"
+				rules = append(rules, rule)
+			}
+		}
 		outbounds = append(outbounds, simple("block-out", "blackhole"))
 		hasBlockOut = true
 	}
 	if dpiSocks != "" {
-		if rule := match(routeDPI); rule != nil {
-			quic := maps.Clone(rule)
-			quic["network"] = "udp"
-			quic["port"] = 443
-			quic["outboundTag"] = "block-out"
-			quic["ruleTag"] = dpiQUICRuleTag
-			rule["outboundTag"] = dpiOutboundTag
-			rule["ruleTag"] = dpiRuleTag
-			rules = append(rules, quic, rule)
+		if d, ip := match(routeDPI); d != nil || ip != nil {
+			// QUIC rules first, then the rest; the ip halves carry their own ruleTags.
+			var quics, plains []map[string]any
+			for _, half := range []struct {
+				rule         map[string]any
+				tag, quicTag string
+			}{{d, dpiRuleTag, dpiQUICRuleTag}, {ip, dpiIPRuleTag, dpiQUICIPRuleTag}} {
+				if half.rule == nil {
+					continue
+				}
+				quic := maps.Clone(half.rule)
+				quic["network"] = "udp"
+				quic["port"] = 443
+				quic["outboundTag"] = "block-out"
+				quic["ruleTag"] = half.quicTag
+				half.rule["outboundTag"] = dpiOutboundTag
+				half.rule["ruleTag"] = half.tag
+				quics = append(quics, quic)
+				plains = append(plains, half.rule)
+			}
+			for _, r := range append(quics, plains...) {
+				rules = append(rules, r)
+			}
 			if !hasBlockOut {
 				outbounds = append(outbounds, simple("block-out", "blackhole"))
 			}
 			outbounds = append(outbounds, buildSocks5Outbound(dpiOutboundTag, dpiSocks, "", ""))
 		}
 	}
-	if rule := match(routeDirect); rule != nil {
-		rule["outboundTag"] = "bypass-out"
-		rules = append(rules, rule)
+	if d, ip := match(routeDirect); d != nil || ip != nil {
+		for _, rule := range []map[string]any{d, ip} {
+			if rule != nil {
+				rule["outboundTag"] = "bypass-out"
+				rules = append(rules, rule)
+			}
+		}
 		outbounds = append(outbounds, simple("bypass-out", "freedom"))
 	}
 	return outbounds, rules, domainStrategy
@@ -1531,7 +1567,7 @@ func dpiRouterConfigs(config *core.Config) (on, off *xserial.TypedMessage, err e
 		}
 		without := &router.Config{DomainStrategy: rc.DomainStrategy, BalancingRule: rc.BalancingRule}
 		for _, rule := range rc.Rule {
-			if rule.RuleTag != dpiRuleTag && rule.RuleTag != dpiQUICRuleTag {
+			if !isDPIRuleTag(rule.RuleTag) {
 				without.Rule = append(without.Rule, rule)
 			}
 		}
